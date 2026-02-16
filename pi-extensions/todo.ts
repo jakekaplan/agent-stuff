@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
@@ -77,10 +77,30 @@ function readTodos(): TodoItem[] {
 	}
 }
 
+function buildAtomicWriteTempPath(): string {
+	const suffix = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+	return join(TODO_DIR, `todo.json.tmp-${suffix}`);
+}
+
 function writeTodos(inputTodos: TodoItem[]): void {
 	ensureTodoDir();
 	const todos = normalizeTodos(inputTodos);
-	writeFileSync(TODO_JSON_PATH, `${JSON.stringify(todos, null, 2)}\n`, "utf-8");
+	const payload = `${JSON.stringify(todos, null, 2)}\n`;
+	const tempPath = buildAtomicWriteTempPath();
+
+	try {
+		writeFileSync(tempPath, payload, "utf-8");
+		renameSync(tempPath, TODO_JSON_PATH);
+	} catch (error) {
+		if (existsSync(tempPath)) {
+			try {
+				unlinkSync(tempPath);
+			} catch {
+				// ignore cleanup failure
+			}
+		}
+		throw error;
+	}
 }
 
 function parseAction(args: string): CommandAction {
@@ -98,13 +118,24 @@ function parseAction(args: string): CommandAction {
 	return { type: "add", text: args };
 }
 
+function formatCreatedAt(createdAt: string): string {
+	const parsed = new Date(createdAt);
+	if (Number.isNaN(parsed.getTime())) return createdAt;
+	return parsed.toLocaleString(undefined, {
+		month: "short",
+		day: "numeric",
+		hour: "2-digit",
+		minute: "2-digit",
+	});
+}
+
 function buildTodoLines(todos: TodoItem[]): string[] {
 	if (todos.length === 0) {
 		return ["No global todos.", "", "Add one with: /todo something important"];
 	}
 
 	return [
-		...todos.map((todo) => `- [${todo.difficulty}] ${todo.text}`),
+		...todos.map((todo) => `- [${todo.difficulty}] ${todo.text} (${formatCreatedAt(todo.createdAt)})`),
 		"",
 		`${todos.length} total`,
 		"Delete with: /todo rm <position>",
@@ -125,7 +156,7 @@ function usage(): string[] {
 		"opt+←/opt+→           move by word (input mode)",
 		"opt+delete            delete word (input mode)",
 		"space                 pick up / drop",
-		"enter                 add todo / confirm",
+		"i/enter               add todo / confirm",
 		"e                     edit selected",
 		"d/delete x2           delete selected",
 		"esc                   cancel / close",
@@ -391,7 +422,8 @@ async function showListModal(ctx: ExtensionCommandContext, todos: TodoItem[]): P
 									? theme.fg("error", ` ${todo.text}`)
 									: theme.fg("warning", ` ${todo.text}`);
 						const styled = isSelected ? theme.bold(colored) : colored;
-						out.push(truncateToWidth(`${marker}${styled}`, width));
+						const created = theme.fg("dim", ` (${formatCreatedAt(todo.createdAt)})`);
+						out.push(truncateToWidth(`${marker}${styled}${created}`, width));
 					}
 					out.push("");
 				}
@@ -411,7 +443,7 @@ async function showListModal(ctx: ExtensionCommandContext, todos: TodoItem[]): P
 				} else if (grabbedIndex !== undefined) {
 					out.push(truncateToWidth(theme.fg("dim", "↑↓ move • ←→ difficulty • space/enter drop • esc cancel"), width));
 				} else {
-					out.push(truncateToWidth(theme.fg("dim", "↑↓ select • ←→ difficulty • space grab • enter new • e edit • d/delete x2 delete • esc close"), width));
+					out.push(truncateToWidth(theme.fg("dim", "↑↓ select • ←→ difficulty • space grab • i/enter new • e edit • d/delete x2 delete • esc close"), width));
 				}
 				out.push("");
 
@@ -540,7 +572,7 @@ async function showListModal(ctx: ExtensionCommandContext, todos: TodoItem[]): P
 					return;
 				}
 
-				if (isEnterKey(data)) {
+				if (isEnterKey(data) || data === "i" || data === "I") {
 					mode = "add";
 					editIndex = undefined;
 					addText = "";
