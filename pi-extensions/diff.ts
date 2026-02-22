@@ -544,6 +544,7 @@ class DiffViewer {
 	private composeText = "";
 	private composeCursor = 0;
 	private sendingMessage = false;
+	private showHelpOverlay = false;
 
 	private splitRowsCache = new Map<number, SplitRow[]>();
 	private bodyLayoutCache = new Map<string, BodyLayout>();
@@ -576,6 +577,25 @@ class DiffViewer {
 			return;
 		}
 
+		if (this.isHelpToggleKey(data)) {
+			this.showHelpOverlay = !this.showHelpOverlay;
+			this.tui.requestRender();
+			return;
+		}
+
+		if (this.showHelpOverlay) {
+			if (matchesKey(data, "escape") || matchesKey(data, "q") || matchesKey(data, "enter") || matchesKey(data, "return")) {
+				this.showHelpOverlay = false;
+				this.tui.requestRender();
+				return;
+			}
+			if (matchesKey(data, "ctrl+c")) {
+				this.close();
+				return;
+			}
+			return;
+		}
+
 		if (matchesKey(data, "escape") || matchesKey(data, "q") || matchesKey(data, "ctrl+c")) {
 			this.close();
 			return;
@@ -601,15 +621,7 @@ class DiffViewer {
 		const lines: string[] = [];
 
 		lines.push(truncateToWidth(`${this.theme.bold("Diff Viewer")} · ${this.theme.fg("accent", this.snapshot.targetLabel)}`, safeWidth));
-		lines.push(
-			truncateToWidth(
-				this.theme.fg(
-					"dim",
-					"space compose msg • compose: enter steer, ⌥enter follow-up • tab/shift+tab file • ↑↓ scroll • ⌥↑/⌥↓ fast scroll • pgup/pgdn • mouse wheel • r refresh • q/esc close",
-				),
-				safeWidth,
-			),
-		);
+		lines.push(truncateToWidth(this.theme.fg("dim", "? keyboard shortcuts"), safeWidth));
 
 		if (safeWidth < 120) {
 			lines.push(truncateToWidth(this.theme.fg("error", this.theme.bold("⚠ SIDE-BY-SIDE NEEDS A WIDER WINDOW (120+ COLS)")), safeWidth));
@@ -618,11 +630,6 @@ class DiffViewer {
 		if (this.statusMessage) {
 			const color = this.statusMessage.startsWith("Refresh failed") ? "error" : "muted";
 			lines.push(truncateToWidth(this.theme.fg(color, this.statusMessage), safeWidth));
-		}
-
-		if (this.composingMode) {
-			lines.push(truncateToWidth(this.theme.fg("accent", "Compose message · enter=steer · opt+enter=follow-up · esc cancel"), safeWidth));
-			lines.push(truncateToWidth(this.renderComposeLine(), safeWidth));
 		}
 
 		if (this.snapshot.files.length > 0) {
@@ -640,6 +647,7 @@ class DiffViewer {
 
 		const body = this.currentBodyViewport(contentWidth, viewport);
 		const maxOffset = body.maxOffset;
+		const hasMoreBelow = this.scrollOffset < maxOffset;
 		const visibleBody = body.lines;
 
 		const sidebar = this.renderSidebarLines(sidebarWidth, viewport);
@@ -650,11 +658,13 @@ class DiffViewer {
 		}
 
 		const footerLeft = `${this.snapshot.files.length === 0 ? "0/0" : `${this.fileIndex + 1}/${this.snapshot.files.length}`} files · ${this.currentChangedLineCount()} lines changed`;
-		const footerRight = `${this.scrollOffset}/${maxOffset}`;
+		const footerRight = hasMoreBelow ? this.theme.fg("accent", "▼ more") : this.theme.fg("muted", "end");
 		const gap = safeWidth - visibleWidth(footerLeft) - visibleWidth(footerRight);
 		const footer = gap >= 1 ? `${footerLeft}${" ".repeat(gap)}${footerRight}` : `${footerLeft} · ${footerRight}`;
 		lines.push(truncateToWidth(this.theme.fg("dim", footer), safeWidth));
-		return lines.map((line) => truncateToWidth(line, safeWidth));
+		if (this.composingMode) lines.push(truncateToWidth(this.renderComposeLine(), safeWidth));
+		const rendered = lines.map((line) => truncateToWidth(line, safeWidth));
+		return this.showHelpOverlay ? this.renderHelpOverlay(rendered, safeWidth) : rendered;
 	}
 
 	invalidate(): void {
@@ -678,6 +688,62 @@ class DiffViewer {
 		const code = Number.parseInt(match[1] ?? "0", 10);
 		if ((code & 64) === 0) return null;
 		return (code & 1) === 0 ? "up" : "down";
+	}
+
+	private isHelpToggleKey(data: string): boolean {
+		return data === "?" || matchesKey(data, "?") || matchesKey(data, "shift+/");
+	}
+
+	private renderHelpOverlay(lines: string[], width: number): string[] {
+		if (lines.length === 0 || width < 24) return lines;
+		const overlay = this.helpOverlayLines(width);
+		if (overlay.length === 0) return lines;
+
+		const out = [...lines];
+		const top = Math.max(0, Math.floor((out.length - overlay.length) / 2));
+		for (let i = 0; i < overlay.length; i += 1) {
+			const row = top + i;
+			if (row < 0 || row >= out.length) continue;
+			const text = overlay[i] ?? "";
+			const leftPad = Math.max(0, Math.floor((width - visibleWidth(text)) / 2));
+			const merged = `${" ".repeat(leftPad)}${text}`;
+			const fill = Math.max(0, width - visibleWidth(merged));
+			out[row] = `${merged}${" ".repeat(fill)}`;
+		}
+		return out;
+	}
+
+	private helpOverlayLines(width: number): string[] {
+		const content = [
+			this.theme.bold("Keyboard shortcuts"),
+			this.theme.fg("dim", "? toggle • esc/enter close"),
+			"",
+			this.theme.fg("accent", "Navigation"),
+			"↑/↓ scroll • ⌥↑/⌥↓ fast • pgup/pgdn • mouse wheel",
+			"tab / shift+tab switch file",
+			"",
+			this.theme.fg("accent", "Actions"),
+			"space compose • r refresh • q/esc close viewer",
+			"",
+			this.theme.fg("accent", "Compose mode"),
+			"type text • enter steer • ⌥enter follow-up • esc cancel",
+			"←/→ move • home/end jump • backspace/delete edit",
+		];
+
+		const minInnerWidth = 16;
+		const maxInnerWidth = Math.max(minInnerWidth, width - 8);
+		const maxContentWidth = content.reduce((max, line) => Math.max(max, visibleWidth(line)), 0);
+		const innerWidth = Math.max(minInnerWidth, Math.min(maxInnerWidth, maxContentWidth));
+		const borderTop = this.theme.fg("accent", `┌${"─".repeat(innerWidth + 2)}┐`);
+		const borderBottom = this.theme.fg("accent", `└${"─".repeat(innerWidth + 2)}┘`);
+		const side = this.theme.fg("accent", "│");
+
+		const body = content.map((line) => {
+			const clipped = truncateToWidth(line, innerWidth, "", false);
+			const fill = Math.max(0, innerWidth - visibleWidth(clipped));
+			return `${side} ${clipped}${" ".repeat(fill)} ${side}`;
+		});
+		return [borderTop, ...body, borderBottom];
 	}
 
 	private close(): void {
