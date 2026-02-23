@@ -46,15 +46,22 @@ function normalizeBranch(branch: string | null | undefined): string | null {
 	return value;
 }
 
-async function fetchLatestOpenPrUrl(cwd: string, branch: string): Promise<string | null> {
+interface PrLookup {
+	url: string | null;
+	headRefOid: string | null;
+}
+
+async function fetchLatestOpenPr(cwd: string, branch: string): Promise<PrLookup> {
 	try {
 		const { stdout } = await execFileAsync(
 			"gh",
-			["pr", "view", branch, "--json", "url,state"],
+			["pr", "view", branch, "--json", "url,state,headRefOid"],
 			{ cwd, timeout: 5000, maxBuffer: 1024 * 1024 },
 		);
-		const pr = JSON.parse(stdout || "{}") as { url?: string; state?: string };
-		if (pr.url && pr.state === "OPEN") return pr.url;
+		const pr = JSON.parse(stdout || "{}") as { url?: string; state?: string; headRefOid?: string };
+		if (pr.url && pr.state === "OPEN") {
+			return { url: pr.url, headRefOid: pr.headRefOid ?? null };
+		}
 	} catch {
 		// Fallback to list in case view fails for this branch/context.
 	}
@@ -62,14 +69,51 @@ async function fetchLatestOpenPrUrl(cwd: string, branch: string): Promise<string
 	try {
 		const { stdout } = await execFileAsync(
 			"gh",
-			["pr", "list", "--state", "open", "--head", branch, "--json", "url", "--limit", "1"],
+			["pr", "list", "--state", "open", "--head", branch, "--json", "url,headRefOid", "--limit", "1"],
 			{ cwd, timeout: 5000, maxBuffer: 1024 * 1024 },
 		);
-		const prs = JSON.parse(stdout || "[]") as Array<{ url?: string }>;
-		return prs[0]?.url ?? null;
+		const prs = JSON.parse(stdout || "[]") as Array<{ url?: string; headRefOid?: string }>;
+		const pr = prs[0];
+		return { url: pr?.url ?? null, headRefOid: pr?.headRefOid ?? null };
 	} catch {
-		return null;
+		return { url: null, headRefOid: null };
 	}
+}
+
+async function fetchLocalGitState(cwd: string): Promise<{ headOid: string | null; dirty: boolean }> {
+	let headOid: string | null = null;
+	let dirty = false;
+
+	try {
+		const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], {
+			cwd,
+			timeout: 3000,
+			maxBuffer: 1024 * 1024,
+		});
+		headOid = stdout.trim() || null;
+	} catch {
+		headOid = null;
+	}
+
+	try {
+		const { stdout } = await execFileAsync("git", ["status", "--porcelain", "--untracked-files=no"], {
+			cwd,
+			timeout: 3000,
+			maxBuffer: 1024 * 1024,
+		});
+		dirty = stdout.trim().length > 0;
+	} catch {
+		dirty = false;
+	}
+
+	return { headOid, dirty };
+}
+
+function formatPrStateSuffix(dirty: boolean, localHeadOid: string | null, prHeadOid: string | null): string {
+	const parts: string[] = [];
+	if (dirty) parts.push("*");
+	if (localHeadOid && prHeadOid) parts.push(localHeadOid === prHeadOid ? "=" : "≠");
+	return parts.join("");
 }
 
 interface TokenStats {
@@ -99,6 +143,9 @@ function renderRow1(
 	ctx: ExtensionContext,
 	prUrl: string | null,
 	prBranch: string | null,
+	localHeadOid: string | null,
+	prHeadOid: string | null,
+	dirty: boolean,
 	footerData: any,
 	theme: any,
 	width: number,
@@ -107,7 +154,11 @@ function renderRow1(
 	const branchStr = branch ? ` (${branch})` : "";
 	const left = theme.fg("dim", `${shortenHome(ctx.cwd)}${branchStr}`);
 	const showPrUrl = branch && prBranch === branch ? prUrl : null;
-	const right = showPrUrl ? theme.fg("dim", osc8Link(showPrUrl, formatPrLabel(showPrUrl))) : "";
+	const suffix = formatPrStateSuffix(dirty, localHeadOid, prHeadOid);
+	const label = showPrUrl ? formatPrLabel(showPrUrl) : "";
+	const right = showPrUrl
+		? theme.fg("dim", `${suffix ? `${suffix} ` : ""}${osc8Link(showPrUrl, label)}`)
+		: "";
 	return rightAlign(left, right, width);
 }
 
@@ -139,6 +190,9 @@ function renderRow2(ctx: ExtensionContext, pi: ExtensionAPI, theme: any, width: 
 export default function (pi: ExtensionAPI) {
 	let prUrl: string | null = null;
 	let prBranch: string | null = null;
+	let prHeadOid: string | null = null;
+	let localHeadOid: string | null = null;
+	let localDirty = false;
 	let currentBranch: string | null = null;
 	let requestRender: (() => void) | null = null;
 
@@ -146,12 +200,19 @@ export default function (pi: ExtensionAPI) {
 		if (!branch) {
 			prUrl = null;
 			prBranch = null;
+			prHeadOid = null;
+			localHeadOid = null;
+			localDirty = false;
 			requestRender?.();
 			return;
 		}
 
-		prUrl = await fetchLatestOpenPrUrl(ctx.cwd, branch);
+		const [pr, local] = await Promise.all([fetchLatestOpenPr(ctx.cwd, branch), fetchLocalGitState(ctx.cwd)]);
+		prUrl = pr.url;
 		prBranch = branch;
+		prHeadOid = pr.headRefOid;
+		localHeadOid = local.headOid;
+		localDirty = local.dirty;
 		requestRender?.();
 	}
 
@@ -177,7 +238,7 @@ export default function (pi: ExtensionAPI) {
 				invalidate() {},
 				render(width: number): string[] {
 					return [
-						renderRow1(ctx, prUrl, prBranch, footerData, theme, width),
+						renderRow1(ctx, prUrl, prBranch, localHeadOid, prHeadOid, localDirty, footerData, theme, width),
 						renderRow2(ctx, pi, theme, width),
 					];
 				},
