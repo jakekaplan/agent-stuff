@@ -1,10 +1,16 @@
 /**
  * Custom Footer Extension
  *
- * Row 1: cwd (branch) .................. PR link (clickable)
+ * Row 1: cwd (branch) .............. push-state PR-link
  * Row 2: ↑in ↓out Rcache Wcache $cost usage%/max .. (provider) model • thinking
  *
- * PR link is resolved via GitHub CLI for the current branch.
+ * Push state indicators:
+ *   ✓    = committed + pushed
+ *   *    = uncommitted tracked changes
+ *   ↑N   = N unpushed commits
+ *   *↑N  = uncommitted + unpushed
+ *
+ * PR link resolved via GitHub CLI; push state via git upstream tracking.
  */
 
 import type { AssistantMessage } from "@mariozechner/pi-ai";
@@ -80,9 +86,12 @@ async function fetchLatestOpenPr(cwd: string, branch: string): Promise<PrLookup>
 	}
 }
 
-async function fetchLocalGitState(cwd: string): Promise<{ headOid: string | null; dirty: boolean }> {
+async function fetchLocalGitState(
+	cwd: string,
+): Promise<{ headOid: string | null; dirty: boolean; ahead: number }> {
 	let headOid: string | null = null;
 	let dirty = false;
+	let ahead = -1;
 
 	try {
 		const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], {
@@ -106,13 +115,41 @@ async function fetchLocalGitState(cwd: string): Promise<{ headOid: string | null
 		dirty = false;
 	}
 
-	return { headOid, dirty };
+	try {
+		const { stdout } = await execFileAsync("git", ["rev-list", "--count", "@{upstream}..HEAD"], {
+			cwd,
+			timeout: 3000,
+			maxBuffer: 1024 * 1024,
+		});
+		ahead = parseInt(stdout.trim(), 10) || 0;
+	} catch {
+		ahead = -1;
+	}
+
+	return { headOid, dirty, ahead };
 }
 
-function formatPrStateSuffix(dirty: boolean, localHeadOid: string | null, prHeadOid: string | null): string {
+function formatPushState(
+	dirty: boolean,
+	ahead: number,
+	localHeadOid: string | null,
+	prHeadOid: string | null,
+): string {
 	const parts: string[] = [];
 	if (dirty) parts.push("*");
-	if (localHeadOid && prHeadOid) parts.push(localHeadOid === prHeadOid ? "=" : "≠");
+
+	let unpushed: boolean;
+	if (ahead >= 0) {
+		unpushed = ahead > 0;
+		if (unpushed) parts.push(`↑${ahead}`);
+	} else if (localHeadOid && prHeadOid) {
+		unpushed = localHeadOid !== prHeadOid;
+		if (unpushed) parts.push("↑");
+	} else {
+		return parts.join("");
+	}
+
+	if (!dirty && !unpushed) parts.push("✓");
 	return parts.join("");
 }
 
@@ -146,6 +183,7 @@ function renderRow1(
 	localHeadOid: string | null,
 	prHeadOid: string | null,
 	dirty: boolean,
+	ahead: number,
 	footerData: any,
 	theme: any,
 	width: number,
@@ -154,11 +192,13 @@ function renderRow1(
 	const branchStr = branch ? ` (${branch})` : "";
 	const left = theme.fg("dim", `${shortenHome(ctx.cwd)}${branchStr}`);
 	const showPrUrl = branch && prBranch === branch ? prUrl : null;
-	const suffix = formatPrStateSuffix(dirty, localHeadOid, prHeadOid);
+	const state = formatPushState(dirty, ahead, localHeadOid, prHeadOid);
 	const label = showPrUrl ? formatPrLabel(showPrUrl) : "";
 	const right = showPrUrl
-		? theme.fg("dim", `${suffix ? `${suffix} ` : ""}${osc8Link(showPrUrl, label)}`)
-		: "";
+		? theme.fg("dim", `${state ? `${state} ` : ""}${osc8Link(showPrUrl, label)}`)
+		: state
+			? theme.fg("dim", state)
+			: "";
 	return rightAlign(left, right, width);
 }
 
@@ -193,6 +233,7 @@ export default function (pi: ExtensionAPI) {
 	let prHeadOid: string | null = null;
 	let localHeadOid: string | null = null;
 	let localDirty = false;
+	let localAhead = -1;
 	let currentBranch: string | null = null;
 	let requestRender: (() => void) | null = null;
 
@@ -203,6 +244,7 @@ export default function (pi: ExtensionAPI) {
 			prHeadOid = null;
 			localHeadOid = null;
 			localDirty = false;
+			localAhead = -1;
 			requestRender?.();
 			return;
 		}
@@ -213,6 +255,7 @@ export default function (pi: ExtensionAPI) {
 		prHeadOid = pr.headRefOid;
 		localHeadOid = local.headOid;
 		localDirty = local.dirty;
+		localAhead = local.ahead;
 		requestRender?.();
 	}
 
@@ -238,7 +281,7 @@ export default function (pi: ExtensionAPI) {
 				invalidate() {},
 				render(width: number): string[] {
 					return [
-						renderRow1(ctx, prUrl, prBranch, localHeadOid, prHeadOid, localDirty, footerData, theme, width),
+						renderRow1(ctx, prUrl, prBranch, localHeadOid, prHeadOid, localDirty, localAhead, footerData, theme, width),
 						renderRow2(ctx, pi, theme, width),
 					];
 				},
