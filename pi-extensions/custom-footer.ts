@@ -4,22 +4,17 @@
  * Row 1: cwd (branch) .................. PR link (clickable)
  * Row 2: ↑in ↓out Rcache Wcache $cost usage%/max .. (provider) model • thinking
  *
- * PR link detected from bash output (gh pr create/view, etc.)
- * and restored from session history on reload.
+ * PR link is resolved via GitHub CLI for the current branch.
  */
 
 import type { AssistantMessage } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { isBashToolResult } from "@mariozechner/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { execFile } from "node:child_process";
 import { homedir } from "node:os";
+import { promisify } from "node:util";
 
-const PR_URL_RE = /https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/;
-
-function extractPrUrl(text: string): string | null {
-	const match = text.match(PR_URL_RE);
-	return match ? match[0] : null;
-}
+const execFileAsync = promisify(execFile);
 
 function formatPrLabel(url: string): string {
 	const match = url.match(/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)/);
@@ -45,6 +40,38 @@ function fmtTokens(n: number): string {
 	return n < 1000 ? `${n}` : `${(n / 1000).toFixed(1)}k`;
 }
 
+function normalizeBranch(branch: string | null | undefined): string | null {
+	const value = branch?.trim();
+	if (!value || value === "HEAD") return null;
+	return value;
+}
+
+async function fetchLatestOpenPrUrl(cwd: string, branch: string): Promise<string | null> {
+	try {
+		const { stdout } = await execFileAsync(
+			"gh",
+			["pr", "view", branch, "--json", "url,state"],
+			{ cwd, timeout: 5000, maxBuffer: 1024 * 1024 },
+		);
+		const pr = JSON.parse(stdout || "{}") as { url?: string; state?: string };
+		if (pr.url && pr.state === "OPEN") return pr.url;
+	} catch {
+		// Fallback to list in case view fails for this branch/context.
+	}
+
+	try {
+		const { stdout } = await execFileAsync(
+			"gh",
+			["pr", "list", "--state", "open", "--head", branch, "--json", "url", "--limit", "1"],
+			{ cwd, timeout: 5000, maxBuffer: 1024 * 1024 },
+		);
+		const prs = JSON.parse(stdout || "[]") as Array<{ url?: string }>;
+		return prs[0]?.url ?? null;
+	} catch {
+		return null;
+	}
+}
+
 interface TokenStats {
 	input: number;
 	output: number;
@@ -68,11 +95,19 @@ function computeStats(ctx: ExtensionContext): TokenStats {
 	return stats;
 }
 
-function renderRow1(ctx: ExtensionContext, prUrl: string | null, footerData: any, theme: any, width: number): string {
-	const branch = footerData.getGitBranch();
+function renderRow1(
+	ctx: ExtensionContext,
+	prUrl: string | null,
+	prBranch: string | null,
+	footerData: any,
+	theme: any,
+	width: number,
+): string {
+	const branch = normalizeBranch(footerData.getGitBranch());
 	const branchStr = branch ? ` (${branch})` : "";
 	const left = theme.fg("dim", `${shortenHome(ctx.cwd)}${branchStr}`);
-	const right = prUrl ? theme.fg("dim", osc8Link(prUrl, formatPrLabel(prUrl))) : "";
+	const showPrUrl = branch && prBranch === branch ? prUrl : null;
+	const right = showPrUrl ? theme.fg("dim", osc8Link(showPrUrl, formatPrLabel(showPrUrl))) : "";
 	return rightAlign(left, right, width);
 }
 
@@ -101,34 +136,48 @@ function renderRow2(ctx: ExtensionContext, pi: ExtensionAPI, theme: any, width: 
 	return rightAlign(left, right, width);
 }
 
-function scanBranchForPrUrl(ctx: ExtensionContext): string | null {
-	let found: string | null = null;
-	for (const entry of ctx.sessionManager.getBranch()) {
-		if (entry.type !== "message") continue;
-		if (entry.message.role !== "toolResult") continue;
-		if (entry.message.toolName !== "bash") continue;
-		for (const block of entry.message.content) {
-			if (block.type === "text") {
-				const url = extractPrUrl(block.text);
-				if (url) found = url;
-			}
-		}
-	}
-	return found;
-}
-
 export default function (pi: ExtensionAPI) {
 	let prUrl: string | null = null;
+	let prBranch: string | null = null;
+	let currentBranch: string | null = null;
+	let requestRender: (() => void) | null = null;
+
+	async function refreshPrUrl(ctx: ExtensionContext, branch: string | null) {
+		if (!branch) {
+			prUrl = null;
+			prBranch = null;
+			requestRender?.();
+			return;
+		}
+
+		prUrl = await fetchLatestOpenPrUrl(ctx.cwd, branch);
+		prBranch = branch;
+		requestRender?.();
+	}
 
 	function installFooter(ctx: ExtensionContext) {
 		ctx.ui.setFooter((tui, theme, footerData) => {
-			const unsub = footerData.onBranchChange(() => tui.requestRender());
+			const rerender = () => tui.requestRender();
+			requestRender = rerender;
+
+			const updateBranch = () => {
+				currentBranch = normalizeBranch(footerData.getGitBranch());
+				void refreshPrUrl(ctx, currentBranch);
+				rerender();
+			};
+
+			const unsub = footerData.onBranchChange(updateBranch);
+			updateBranch();
+
 			return {
-				dispose: unsub,
+				dispose() {
+					if (requestRender === rerender) requestRender = null;
+					unsub();
+				},
 				invalidate() {},
 				render(width: number): string[] {
 					return [
-						renderRow1(ctx, prUrl, footerData, theme, width),
+						renderRow1(ctx, prUrl, prBranch, footerData, theme, width),
 						renderRow2(ctx, pi, theme, width),
 					];
 				},
@@ -137,17 +186,10 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
-		prUrl = scanBranchForPrUrl(ctx);
 		installFooter(ctx);
 	});
 
-	pi.on("tool_result", async (event, _ctx) => {
-		if (!isBashToolResult(event)) return;
-		for (const block of event.content) {
-			if (block.type === "text") {
-				const url = extractPrUrl(block.text);
-				if (url) prUrl = url;
-			}
-		}
+	pi.on("agent_end", async (_event, ctx) => {
+		await refreshPrUrl(ctx, currentBranch);
 	});
 }
