@@ -56,6 +56,10 @@ type ReviewSettingsState = {
 	loopFixingEnabled?: boolean;
 };
 
+function enableSelectListSearch(list: SelectList): void {
+	(list as SelectList & { searchable?: boolean }).searchable = true;
+}
+
 function setReviewWidget(ctx: ExtensionContext, active: boolean) {
 	if (!ctx.hasUI) return;
 	if (!active) {
@@ -1002,7 +1006,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 			});
 
 			// Enable search
-			selectList.searchable = true;
+			enableSelectListSearch(selectList);
 
 			selectList.onSelect = (item) => done(item.value);
 			selectList.onCancel = () => done(null);
@@ -1060,7 +1064,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 			});
 
 			// Enable search
-			selectList.searchable = true;
+			enableSelectListSearch(selectList);
 
 			selectList.onSelect = (item) => {
 				const commit = commits.find((c) => c.sha === item.value);

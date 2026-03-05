@@ -66,6 +66,10 @@ type SplitRow =
 			right?: ParsedDiffLine;
 	  };
 
+function enableSelectListSearch(list: SelectList): void {
+	(list as SelectList & { searchable?: boolean }).searchable = true;
+}
+
 function cleanDiffPath(path: string): string {
 	if (path.startsWith("a/")) return path.slice(2);
 	if (path.startsWith("b/")) return path.slice(2);
@@ -438,7 +442,7 @@ async function showCommitSelector(ctx: ExtensionCommandContext, pi: ExtensionAPI
 			scrollInfo: (text) => theme.fg("dim", text),
 			noMatch: (text) => theme.fg("warning", text),
 		});
-		list.searchable = true;
+		enableSelectListSearch(list);
 		list.onSelect = (item) => {
 			const commit = commits.find((entry) => entry.sha === item.value);
 			done(commit ?? null);
@@ -534,6 +538,11 @@ type BodyLayout = {
 	totalLines: number;
 };
 
+type VisibleBodyLine = {
+	text: string;
+	rowIndex: number | null;
+};
+
 class DiffViewer {
 	private fileIndex = 0;
 	private scrollOffset = 0;
@@ -541,10 +550,12 @@ class DiffViewer {
 	private statusMessage = "";
 	private closed = false;
 	private composingMode: "steer" | "followUp" | null = null;
+	private composeAnchorRowIndex: number | null = null;
 	private composeText = "";
 	private composeCursor = 0;
 	private sendingMessage = false;
 	private showHelpOverlay = false;
+	private cursorRowIndex = 0;
 
 	private splitRowsCache = new Map<number, SplitRow[]>();
 	private bodyLayoutCache = new Map<string, BodyLayout>();
@@ -600,20 +611,20 @@ class DiffViewer {
 			this.close();
 			return;
 		}
-		if (matchesKey(data, "space")) return this.startCompose();
+		if (matchesKey(data, "enter") || matchesKey(data, "return")) return this.startCompose();
 		if (matchesKey(data, "tab")) return this.stepFile(1);
 		if (matchesKey(data, "shift+tab")) return this.stepFile(-1);
-		if (matchesKey(data, "up")) return this.scroll(-1);
-		if (matchesKey(data, "down")) return this.scroll(1);
-		if (matchesKey(data, "alt+up")) return this.scroll(-Math.max(12, Math.floor(this.viewportHeight() * 0.6)));
-		if (matchesKey(data, "alt+down")) return this.scroll(Math.max(12, Math.floor(this.viewportHeight() * 0.6)));
-		if (matchesKey(data, "pageUp")) return this.scroll(-Math.max(6, Math.floor(this.viewportHeight() * 0.7)));
-		if (matchesKey(data, "pageDown")) return this.scroll(Math.max(6, Math.floor(this.viewportHeight() * 0.7)));
+		if (matchesKey(data, "up")) return this.moveCursor(-1);
+		if (matchesKey(data, "down")) return this.moveCursor(1);
+		if (matchesKey(data, "alt+up")) return this.moveCursor(-Math.max(6, Math.floor(this.viewportHeight() * 0.45)));
+		if (matchesKey(data, "alt+down")) return this.moveCursor(Math.max(6, Math.floor(this.viewportHeight() * 0.45)));
+		if (matchesKey(data, "pageUp")) return this.moveCursor(-Math.max(6, Math.floor(this.viewportHeight() * 0.7)));
+		if (matchesKey(data, "pageDown")) return this.moveCursor(Math.max(6, Math.floor(this.viewportHeight() * 0.7)));
 		if (matchesKey(data, "r")) return void this.refresh();
 
 		const wheel = this.parseMouseWheel(data);
-		if (wheel === "up") return this.scroll(-3);
-		if (wheel === "down") return this.scroll(3);
+		if (wheel === "up") return this.moveCursor(-3);
+		if (wheel === "down") return this.moveCursor(3);
 	}
 
 	render(width: number): string[] {
@@ -648,12 +659,12 @@ class DiffViewer {
 		const body = this.currentBodyViewport(contentWidth, viewport);
 		const maxOffset = body.maxOffset;
 		const hasMoreBelow = this.scrollOffset < maxOffset;
-		const visibleBody = body.lines;
+		const bodyLines = this.renderBodyColumn(body.lines, contentWidth, viewport);
 
 		const sidebar = this.renderSidebarLines(sidebarWidth, viewport);
 		for (let i = 0; i < viewport; i += 1) {
 			const left = this.padToWidth(sidebar[i] ?? "", sidebarWidth);
-			const right = this.padToWidth(visibleBody[i] ?? "", contentWidth);
+			const right = this.padToWidth(bodyLines[i] ?? "", contentWidth);
 			lines.push(`${left}${separator}${right}`);
 		}
 
@@ -662,7 +673,7 @@ class DiffViewer {
 		const gap = safeWidth - visibleWidth(footerLeft) - visibleWidth(footerRight);
 		const footer = gap >= 1 ? `${footerLeft}${" ".repeat(gap)}${footerRight}` : `${footerLeft} · ${footerRight}`;
 		lines.push(truncateToWidth(this.theme.fg("dim", footer), safeWidth));
-		if (this.composingMode) lines.push(truncateToWidth(this.renderComposeLine(), safeWidth));
+
 		const rendered = lines.map((line) => truncateToWidth(line, safeWidth));
 		return this.showHelpOverlay ? this.renderHelpOverlay(rendered, safeWidth) : rendered;
 	}
@@ -719,13 +730,14 @@ class DiffViewer {
 			this.theme.fg("dim", "? toggle • esc/enter close"),
 			"",
 			this.theme.fg("accent", "Navigation"),
-			"↑/↓ scroll • ⌥↑/⌥↓ fast • pgup/pgdn • mouse wheel",
+			"↑/↓ move cursor • ⌥↑/⌥↓ fast • pgup/pgdn • mouse wheel",
 			"tab / shift+tab switch file",
 			"",
 			this.theme.fg("accent", "Actions"),
-			"space compose • r refresh • q/esc close viewer",
+			"enter annotate at cursor",
+			"r refresh • q/esc close viewer",
 			"",
-			this.theme.fg("accent", "Compose mode"),
+			this.theme.fg("accent", "Annotate mode"),
 			"type text • enter steer • ⌥enter follow-up • esc cancel",
 			"←/→ move • home/end jump • backspace/delete edit",
 		];
@@ -765,19 +777,22 @@ class DiffViewer {
 
 	private startCompose(): void {
 		if (this.closed || this.sendingMessage) return;
+		this.clampCursorToCurrentFile();
 		this.composingMode = "steer";
+		this.composeAnchorRowIndex = this.cursorRowIndex;
 		this.composeText = "";
 		this.composeCursor = 0;
-		this.statusMessage = "Compose message";
+		this.statusMessage = `Annotate ${this.composeAnchorSummary()}`;
 		this.tui.requestRender();
 	}
 
 	private cancelCompose(): void {
 		if (!this.composingMode) return;
 		this.composingMode = null;
+		this.composeAnchorRowIndex = null;
 		this.composeText = "";
 		this.composeCursor = 0;
-		this.statusMessage = "Compose cancelled";
+		this.statusMessage = "Annotate cancelled";
 		this.tui.requestRender();
 	}
 
@@ -857,7 +872,7 @@ class DiffViewer {
 		if (!this.composingMode || this.sendingMessage) return;
 		const text = this.composeText.trim();
 		if (!text) {
-			this.statusMessage = "Message empty";
+			this.statusMessage = "Annotation empty";
 			this.tui.requestRender();
 			return;
 		}
@@ -867,9 +882,11 @@ class DiffViewer {
 		this.tui.requestRender();
 
 		try {
-			const status = await this.onQueueMessage(mode, text);
+			const contextualizedText = this.withComposeContext(text);
+			const status = await this.onQueueMessage(mode, contextualizedText);
 			if (this.closed) return;
 			this.composingMode = null;
+			this.composeAnchorRowIndex = null;
 			this.composeText = "";
 			this.composeCursor = 0;
 			if (status) this.statusMessage = status;
@@ -883,14 +900,23 @@ class DiffViewer {
 		}
 	}
 
-	private renderComposeLine(): string {
-		const prefix = this.theme.fg("accent", "✎ ");
-		if (this.composeText.length === 0) {
-			return `${prefix}${this.theme.fg("dim", "▏type message")}`;
+	private withComposeContext(text: string): string {
+		const contextLines: string[] = [];
+		const file = this.snapshot.files[this.fileIndex];
+		const filePath = file ? this.getSyntaxPath(file) : "";
+		if (filePath && !text.includes(`@${filePath}`)) {
+			contextLines.push(`Context file: @${filePath}`);
 		}
-		const before = this.composeText.slice(0, this.composeCursor);
-		const after = this.composeText.slice(this.composeCursor);
-		return `${prefix}${before}${this.theme.fg("accent", "▏")}${after}`;
+
+		if (this.composeAnchorRowIndex != null) {
+			const rowContext = this.getRowContext(this.fileIndex, this.composeAnchorRowIndex);
+			if (rowContext?.hunkHeader) contextLines.push(`Diff hunk: ${rowContext.hunkHeader}`);
+			if (rowContext?.lineLabel) contextLines.push(`Diff line: ${rowContext.lineLabel}`);
+			if (rowContext?.snippet) contextLines.push(`Diff snippet: ${rowContext.snippet}`);
+		}
+
+		if (contextLines.length === 0) return text;
+		return `${text}\n\n${contextLines.join("\n")}`;
 	}
 
 	private stepFile(delta: 1 | -1): void {
@@ -904,6 +930,7 @@ class DiffViewer {
 		if (next < 0) next = order.length - 1;
 		if (next >= order.length) next = 0;
 		this.fileIndex = order[next] ?? this.fileIndex;
+		this.cursorRowIndex = 0;
 		this.scrollOffset = 0;
 		this.pauseHighlightUntilIdle();
 		this.tui.requestRender();
@@ -935,10 +962,43 @@ class DiffViewer {
 		}, 120);
 	}
 
-	private scroll(delta: number): void {
+	private moveCursor(delta: number): void {
 		if (delta === 0) return;
-		this.scrollOffset = Math.max(0, this.scrollOffset + delta);
+		const file = this.snapshot.files[this.fileIndex];
+		if (!file || file.isBinary) {
+			this.cursorRowIndex = 0;
+			this.scrollOffset = 0;
+			this.tui.requestRender();
+			return;
+		}
+
+		const rows = this.getSplitRows(this.fileIndex, file);
+		if (rows.length === 0) {
+			this.cursorRowIndex = 0;
+			this.scrollOffset = 0;
+			this.tui.requestRender();
+			return;
+		}
+
+		const next = Math.max(0, Math.min(rows.length - 1, this.cursorRowIndex + delta));
+		this.cursorRowIndex = next;
 		this.tui.requestRender();
+	}
+
+	private clampCursorToCurrentFile(): void {
+		const file = this.snapshot.files[this.fileIndex];
+		if (!file || file.isBinary) {
+			this.cursorRowIndex = 0;
+			return;
+		}
+
+		const rows = this.getSplitRows(this.fileIndex, file);
+		if (rows.length === 0) {
+			this.cursorRowIndex = 0;
+			return;
+		}
+
+		this.cursorRowIndex = Math.max(0, Math.min(this.cursorRowIndex, rows.length - 1));
 	}
 
 	private viewportHeight(): number {
@@ -956,6 +1016,156 @@ class DiffViewer {
 		return `${clipped}${" ".repeat(fill)}`;
 	}
 
+	private renderBodyColumn(lines: VisibleBodyLine[], contentWidth: number, viewport: number): string[] {
+		const rendered = lines.map((line) => {
+			const padded = this.padToWidth(line.text, contentWidth);
+			if (line.rowIndex == null || line.rowIndex !== this.cursorRowIndex) {
+				return padded;
+			}
+			return this.decorateFocusedRowOnAdditionSide(padded, contentWidth);
+		});
+
+		const bodyLines = rendered.slice(0, viewport);
+		while (bodyLines.length < viewport) bodyLines.push("");
+
+		if (this.composingMode && this.composeAnchorRowIndex != null) {
+			const anchorVisualIndex = lines.findIndex((line) => line.rowIndex === this.composeAnchorRowIndex);
+			if (anchorVisualIndex >= 0 && anchorVisualIndex < viewport) {
+				const overlay = this.renderInlineComposeOverlay(contentWidth);
+				const preferBelow = anchorVisualIndex < Math.floor(viewport / 2);
+				const maxTop = Math.max(0, viewport - overlay.length);
+				let overlayTop = preferBelow ? anchorVisualIndex + 1 : anchorVisualIndex - overlay.length;
+				overlayTop = Math.max(0, Math.min(overlayTop, maxTop));
+
+				for (let i = 0; i < overlay.length; i += 1) {
+					const row = overlayTop + i;
+					if (row < 0 || row >= bodyLines.length) continue;
+					bodyLines[row] = this.padToWidth(overlay[i] ?? "", contentWidth);
+				}
+			}
+		}
+
+		return bodyLines;
+	}
+
+	private decorateFocusedRowOnAdditionSide(line: string, width: number): string {
+		const separatorNeedle = "│ ";
+		const separatorIndex = line.indexOf(separatorNeedle);
+		if (separatorIndex >= 0) {
+			return `${line.slice(0, separatorIndex + 1)}${this.theme.fg("accent", "▸")}${line.slice(separatorIndex + separatorNeedle.length)}`;
+		}
+
+		const clipped = truncateToWidth(line, Math.max(1, width - 1), "", true);
+		const fill = Math.max(0, width - 1 - visibleWidth(clipped));
+		return `${clipped}${" ".repeat(fill)}${this.theme.fg("accent", "▸")}`;
+	}
+
+	private renderInlineComposeOverlay(width: number): string[] {
+		const accentBorder = (text: string) => this.theme.fg("accent", text);
+		const innerWidth = Math.max(12, width - 2);
+		const padInner = (text: string) => {
+			const clipped = truncateToWidth(text, innerWidth, "", false);
+			const fill = Math.max(0, innerWidth - visibleWidth(clipped));
+			return `${clipped}${" ".repeat(fill)}`;
+		};
+
+		const top = accentBorder(`┌${"─".repeat(innerWidth)}┐`);
+		const titleText = this.theme.fg("accent", ` annotate ${this.composeAnchorSummary()} `);
+		const titleLine = `${accentBorder("│")}${padInner(titleText)}${accentBorder("│")}`;
+		const editLine = `${accentBorder("│")}${padInner(`${this.theme.fg("accent", "✎ ")}${this.composeEditorContent()}`)}${accentBorder("│")}`;
+		const hintText = this.theme.fg("dim", "enter send • ⌥enter follow-up • esc cancel");
+		const hintLine = `${accentBorder("│")}${padInner(hintText)}${accentBorder("│")}`;
+		const bottom = accentBorder(`└${"─".repeat(innerWidth)}┘`);
+		return [top, titleLine, editLine, hintLine, bottom];
+	}
+
+	private composeEditorContent(): string {
+		if (this.composeText.length === 0) {
+			return this.theme.fg("dim", "▏type annotation");
+		}
+		const before = this.composeText.slice(0, this.composeCursor);
+		const after = this.composeText.slice(this.composeCursor);
+		return `${before}${this.theme.fg("accent", "▏")}${after}`;
+	}
+
+	private composeAnchorSummary(): string {
+		if (this.composeAnchorRowIndex == null) {
+			return "line";
+		}
+		const context = this.getRowContext(this.fileIndex, this.composeAnchorRowIndex);
+		if (!context?.lineLabel) return "line";
+		return context.lineLabel;
+	}
+
+	private getRowContext(
+		fileIndex: number,
+		rowIndex: number,
+	): { lineLabel?: string; hunkHeader?: string; snippet?: string } | null {
+		const file = this.snapshot.files[fileIndex];
+		if (!file || file.isBinary) return null;
+		const rows = this.getSplitRows(fileIndex, file);
+		const row = rows[rowIndex];
+		if (!row) return null;
+
+		const hunkHeader = this.findNearestHunkHeader(rows, rowIndex);
+		if (row.type === "hunk") {
+			return {
+				lineLabel: "hunk header",
+				hunkHeader,
+			};
+		}
+
+		const oldLine = row.left?.oldLineNumber;
+		const newLine = row.right?.newLineNumber;
+		const lineLabel = `old:${oldLine ?? "—"} new:${newLine ?? "—"}`;
+		const preferredSnippet = row.right?.text || row.left?.text || "";
+		const snippet = preferredSnippet.trim().slice(0, 160);
+
+		return {
+			lineLabel,
+			hunkHeader,
+			snippet: snippet.length > 0 ? snippet : undefined,
+		};
+	}
+
+	private findNearestHunkHeader(rows: SplitRow[], rowIndex: number): string | undefined {
+		for (let i = rowIndex; i >= 0; i -= 1) {
+			const row = rows[i];
+			if (row?.type !== "hunk") continue;
+			return row.header;
+		}
+		return undefined;
+	}
+
+	private ensureCursorVisible(fileIndex: number, file: ParsedDiffFile, width: number, viewport: number): void {
+		if (file.isBinary) {
+			this.scrollOffset = 0;
+			return;
+		}
+
+		const rows = this.getSplitRows(fileIndex, file);
+		if (rows.length === 0) {
+			this.scrollOffset = 0;
+			return;
+		}
+
+		this.clampCursorToCurrentFile();
+		const layout = this.getBodyLayout(fileIndex, file, width);
+		const maxOffset = Math.max(0, layout.totalLines - viewport);
+		const rowStart = layout.rowStarts[this.cursorRowIndex] ?? 0;
+		const rowHeight = layout.rowHeights[this.cursorRowIndex] ?? 1;
+		const rowEnd = rowStart + rowHeight - 1;
+		const viewEnd = this.scrollOffset + viewport - 1;
+
+		if (rowStart < this.scrollOffset) {
+			this.scrollOffset = rowStart;
+		} else if (rowEnd > viewEnd) {
+			this.scrollOffset = rowEnd - viewport + 1;
+		}
+
+		this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxOffset));
+	}
+
 	private async refresh(): Promise<void> {
 		if (this.refreshing || this.closed) return;
 		this.refreshing = true;
@@ -967,6 +1177,7 @@ class DiffViewer {
 			if (this.closed) return;
 			this.snapshot = snapshot;
 			if (this.fileIndex >= this.snapshot.files.length) this.fileIndex = Math.max(0, this.snapshot.files.length - 1);
+			this.cursorRowIndex = 0;
 			this.scrollOffset = 0;
 			this.splitRowsCache.clear();
 			this.bodyLayoutCache.clear();
@@ -984,11 +1195,11 @@ class DiffViewer {
 		this.tui.requestRender();
 	}
 
-	private currentBodyViewport(width: number, viewport: number): { lines: string[]; maxOffset: number } {
+	private currentBodyViewport(width: number, viewport: number): { lines: VisibleBodyLine[]; maxOffset: number } {
 		if (this.snapshot.files.length === 0) {
-			const all = [
-				truncateToWidth(this.theme.fg("warning", "No diff files for this target."), width),
-				truncateToWidth(this.theme.fg("dim", "Try a different source or press r to refresh."), width),
+			const all: VisibleBodyLine[] = [
+				{ text: truncateToWidth(this.theme.fg("warning", "No diff files for this target."), width), rowIndex: null },
+				{ text: truncateToWidth(this.theme.fg("dim", "Try a different source or press r to refresh."), width), rowIndex: null },
 			];
 			const maxOffset = Math.max(0, all.length - viewport);
 			this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxOffset));
@@ -997,6 +1208,7 @@ class DiffViewer {
 
 		const file = this.snapshot.files[this.fileIndex];
 		if (!file) return { lines: [], maxOffset: 0 };
+		this.ensureCursorVisible(this.fileIndex, file, width, viewport);
 		return this.renderFileViewport(file, width, this.fileIndex, viewport);
 	}
 
@@ -1184,9 +1396,11 @@ class DiffViewer {
 		return `${status} ${this.theme.bold(path)}${binary}${counts}${mode}`;
 	}
 
-	private renderFileViewport(file: ParsedDiffFile, width: number, fileIndex: number, viewport: number): { lines: string[]; maxOffset: number } {
+	private renderFileViewport(file: ParsedDiffFile, width: number, fileIndex: number, viewport: number): { lines: VisibleBodyLine[]; maxOffset: number } {
 		if (file.isBinary) {
-			const all = [truncateToWidth(this.theme.fg("warning", "Binary file changed. Side-by-side text diff unavailable."), width)];
+			const all: VisibleBodyLine[] = [
+				{ text: truncateToWidth(this.theme.fg("warning", "Binary file changed. Side-by-side text diff unavailable."), width), rowIndex: null },
+			];
 			const maxOffset = Math.max(0, all.length - viewport);
 			this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxOffset));
 			return { lines: all.slice(this.scrollOffset, this.scrollOffset + viewport), maxOffset };
@@ -1194,7 +1408,7 @@ class DiffViewer {
 
 		const rows = this.getSplitRows(fileIndex, file);
 		if (rows.length === 0) {
-			const all = [truncateToWidth(this.theme.fg("muted", "No textual changes."), width)];
+			const all: VisibleBodyLine[] = [{ text: truncateToWidth(this.theme.fg("muted", "No textual changes."), width), rowIndex: null }];
 			const maxOffset = Math.max(0, all.length - viewport);
 			this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxOffset));
 			return { lines: all.slice(this.scrollOffset, this.scrollOffset + viewport), maxOffset };
@@ -1269,9 +1483,9 @@ class DiffViewer {
 		return Math.max(0, Math.min(rowStarts.length - 1, low));
 	}
 
-	private renderVisibleRows(rows: SplitRow[], fileIndex: number, layout: BodyLayout, startOffset: number, viewport: number): string[] {
+	private renderVisibleRows(rows: SplitRow[], fileIndex: number, layout: BodyLayout, startOffset: number, viewport: number): VisibleBodyLine[] {
 		if (rows.length === 0 || viewport <= 0) return [];
-		const out: string[] = [];
+		const out: VisibleBodyLine[] = [];
 		const endOffset = startOffset + viewport;
 		let rowIndex = this.findRowIndexForOffset(layout.rowStarts, layout.rowHeights, startOffset);
 
@@ -1289,7 +1503,9 @@ class DiffViewer {
 
 			if (sliceStart < sliceEnd) {
 				const rendered = this.renderSplitRow(row, fileIndex, layout.metrics);
-				out.push(...rendered.slice(sliceStart, sliceEnd));
+				for (const line of rendered.slice(sliceStart, sliceEnd)) {
+					out.push({ text: line, rowIndex });
+				}
 			}
 
 			rowIndex += 1;
@@ -1519,7 +1735,7 @@ export default function diffExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			const snapshot = await ctx.ui.custom((tui, theme, _kb, done) => {
+			const snapshot = await ctx.ui.custom<DiffSnapshot | null>((tui, theme, _kb, done) => {
 				const loader = new BorderedLoader(tui, theme, "Loading diff...");
 				loader.onAbort = () => done(null);
 				buildDiffSnapshot(pi, target)

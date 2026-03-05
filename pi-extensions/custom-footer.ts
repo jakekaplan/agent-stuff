@@ -212,7 +212,7 @@ function renderRow2(ctx: ExtensionContext, pi: ExtensionAPI, theme: any, width: 
 	if (stats.cacheRead > 0) parts.push(`R${fmtTokens(stats.cacheRead)}`);
 	if (stats.cacheWrite > 0) parts.push(`W${fmtTokens(stats.cacheWrite)}`);
 	parts.push(`$${stats.cost.toFixed(3)}`);
-	if (usage && model) {
+	if (usage?.tokens != null && model) {
 		const pct = ((usage.tokens / model.contextWindow) * 100).toFixed(1);
 		parts.push(`${pct}%/${Math.round(model.contextWindow / 1000)}k`);
 	}

@@ -1,0 +1,3 @@
+node_modules/
+pi-extensions/node_modules/
+*.tsbuildinfo
