@@ -29,10 +29,10 @@
 
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { DynamicBorder, BorderedLoader } from "@mariozechner/pi-coding-agent";
+import * as piTui from "@mariozechner/pi-tui";
 import {
 	Container,
 	fuzzyFilter,
-	getEditorKeybindings,
 	Input,
 	type SelectItem,
 	SelectList,
@@ -67,6 +67,22 @@ type ReviewSettingsState = {
 	loopFixingEnabled?: boolean;
 	customInstructions?: string;
 };
+
+type TuiKeybindings = {
+	matches(data: string, action: string): boolean;
+};
+
+function getTuiKeybindings(): TuiKeybindings {
+	const bindings = piTui as unknown as {
+		getKeybindings?: () => TuiKeybindings;
+		getEditorKeybindings?: () => TuiKeybindings;
+	};
+	const keybindings = bindings.getKeybindings?.() ?? bindings.getEditorKeybindings?.();
+	if (!keybindings) {
+		throw new Error("No compatible pi-tui keybindings API found");
+	}
+	return keybindings;
+}
 
 function setReviewWidget(ctx: ExtensionContext, active: boolean) {
 	if (!ctx.hasUI) return;
@@ -1129,16 +1145,16 @@ export default function reviewExtension(pi: ExtensionAPI) {
 					container.invalidate();
 				},
 				handleInput(data: string) {
-					const kb = getEditorKeybindings();
+					const kb = getTuiKeybindings();
 					if (
-						kb.matches(data, "selectUp") ||
-						kb.matches(data, "selectDown") ||
-						kb.matches(data, "selectConfirm") ||
-						kb.matches(data, "selectCancel")
+						kb.matches(data, "tui.select.up") ||
+						kb.matches(data, "tui.select.down") ||
+						kb.matches(data, "tui.select.confirm") ||
+						kb.matches(data, "tui.select.cancel")
 					) {
 						if (selectList) {
 							selectList.handleInput(data);
-						} else if (kb.matches(data, "selectCancel")) {
+						} else if (kb.matches(data, "tui.select.cancel")) {
 							done(null);
 						}
 						tui.requestRender();
@@ -1236,16 +1252,16 @@ export default function reviewExtension(pi: ExtensionAPI) {
 					container.invalidate();
 				},
 				handleInput(data: string) {
-					const kb = getEditorKeybindings();
+					const kb = getTuiKeybindings();
 					if (
-						kb.matches(data, "selectUp") ||
-						kb.matches(data, "selectDown") ||
-						kb.matches(data, "selectConfirm") ||
-						kb.matches(data, "selectCancel")
+						kb.matches(data, "tui.select.up") ||
+						kb.matches(data, "tui.select.down") ||
+						kb.matches(data, "tui.select.confirm") ||
+						kb.matches(data, "tui.select.cancel")
 					) {
 						if (selectList) {
 							selectList.handleInput(data);
-						} else if (kb.matches(data, "selectCancel")) {
+						} else if (kb.matches(data, "tui.select.cancel")) {
 							done(null);
 						}
 						tui.requestRender();
