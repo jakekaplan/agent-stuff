@@ -1,4 +1,7 @@
 /**
+ * NOTE: This extension is taken from `mitsuhiko/agent-stuff`:
+ * https://github.com/mitsuhiko/agent-stuff/tree/main/pi-extensions
+ *
  * Code Review Extension (inspired by Codex's review feature)
  *
  * Provides a `/review` command that prompts the agent to review code changes.

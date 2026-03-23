@@ -1,4 +1,7 @@
 /**
+ * NOTE: This extension is taken from `mitsuhiko/agent-stuff`:
+ * https://github.com/mitsuhiko/agent-stuff/tree/main/pi-extensions
+ *
  * Multi-Edit Extension — replaces the built-in `edit` tool.
  *
  * Supports all original parameters (path, oldText, newText) plus:
