@@ -29,7 +29,6 @@
 
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { DynamicBorder, BorderedLoader } from "@mariozechner/pi-coding-agent";
-import * as piTui from "@mariozechner/pi-tui";
 import {
 	Container,
 	fuzzyFilter,
@@ -67,22 +66,6 @@ type ReviewSettingsState = {
 	loopFixingEnabled?: boolean;
 	customInstructions?: string;
 };
-
-type TuiKeybindings = {
-	matches(data: string, action: string): boolean;
-};
-
-function getTuiKeybindings(): TuiKeybindings {
-	const bindings = piTui as unknown as {
-		getKeybindings?: () => TuiKeybindings;
-		getEditorKeybindings?: () => TuiKeybindings;
-	};
-	const keybindings = bindings.getKeybindings?.() ?? bindings.getEditorKeybindings?.();
-	if (!keybindings) {
-		throw new Error("No compatible pi-tui keybindings API found");
-	}
-	return keybindings;
-}
 
 function setReviewWidget(ctx: ExtensionContext, active: boolean) {
 	if (!ctx.hasUI) return;
@@ -1089,7 +1072,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 			description: branch === defaultBranch ? "(default)" : "",
 		}));
 
-		const result = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
+		const result = await ctx.ui.custom<string | null>((tui, theme, keybindings, done) => {
 			const container = new Container();
 			container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
 			container.addChild(new Text(theme.fg("accent", theme.bold("Select base branch"))));
@@ -1145,16 +1128,15 @@ export default function reviewExtension(pi: ExtensionAPI) {
 					container.invalidate();
 				},
 				handleInput(data: string) {
-					const kb = getTuiKeybindings();
 					if (
-						kb.matches(data, "tui.select.up") ||
-						kb.matches(data, "tui.select.down") ||
-						kb.matches(data, "tui.select.confirm") ||
-						kb.matches(data, "tui.select.cancel")
+						keybindings.matches(data, "tui.select.up") ||
+						keybindings.matches(data, "tui.select.down") ||
+						keybindings.matches(data, "tui.select.confirm") ||
+						keybindings.matches(data, "tui.select.cancel")
 					) {
 						if (selectList) {
 							selectList.handleInput(data);
-						} else if (kb.matches(data, "tui.select.cancel")) {
+						} else if (keybindings.matches(data, "tui.select.cancel")) {
 							done(null);
 						}
 						tui.requestRender();
@@ -1189,7 +1171,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 			description: "",
 		}));
 
-		const result = await ctx.ui.custom<{ sha: string; title: string } | null>((tui, theme, _kb, done) => {
+		const result = await ctx.ui.custom<{ sha: string; title: string } | null>((tui, theme, keybindings, done) => {
 			const container = new Container();
 			container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
 			container.addChild(new Text(theme.fg("accent", theme.bold("Select commit to review"))));
@@ -1252,16 +1234,15 @@ export default function reviewExtension(pi: ExtensionAPI) {
 					container.invalidate();
 				},
 				handleInput(data: string) {
-					const kb = getTuiKeybindings();
 					if (
-						kb.matches(data, "tui.select.up") ||
-						kb.matches(data, "tui.select.down") ||
-						kb.matches(data, "tui.select.confirm") ||
-						kb.matches(data, "tui.select.cancel")
+						keybindings.matches(data, "tui.select.up") ||
+						keybindings.matches(data, "tui.select.down") ||
+						keybindings.matches(data, "tui.select.confirm") ||
+						keybindings.matches(data, "tui.select.cancel")
 					) {
 						if (selectList) {
 							selectList.handleInput(data);
-						} else if (kb.matches(data, "tui.select.cancel")) {
+						} else if (keybindings.matches(data, "tui.select.cancel")) {
 							done(null);
 						}
 						tui.requestRender();
