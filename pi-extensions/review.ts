@@ -1131,21 +1131,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 					container.invalidate();
 				},
 				handleInput(data: string) {
-					if (
-						keybindings.matches(data, "tui.select.up") ||
-						keybindings.matches(data, "tui.select.down") ||
-						keybindings.matches(data, "tui.select.confirm") ||
-						keybindings.matches(data, "tui.select.cancel")
-					) {
-						if (selectList) {
-							selectList.handleInput(data);
-						} else if (keybindings.matches(data, "tui.select.cancel")) {
-							done(null);
-						}
-						tui.requestRender();
-						return;
-					}
-
+					selectList?.handleInput(data);
 					searchInput.handleInput(data);
 					applyFilter();
 					tui.requestRender();
@@ -1237,21 +1223,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 					container.invalidate();
 				},
 				handleInput(data: string) {
-					if (
-						keybindings.matches(data, "tui.select.up") ||
-						keybindings.matches(data, "tui.select.down") ||
-						keybindings.matches(data, "tui.select.confirm") ||
-						keybindings.matches(data, "tui.select.cancel")
-					) {
-						if (selectList) {
-							selectList.handleInput(data);
-						} else if (keybindings.matches(data, "tui.select.cancel")) {
-							done(null);
-						}
-						tui.requestRender();
-						return;
-					}
-
+					selectList?.handleInput(data);
 					searchInput.handleInput(data);
 					applyFilter();
 					tui.requestRender();
