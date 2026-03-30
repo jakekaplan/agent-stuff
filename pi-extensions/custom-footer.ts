@@ -14,10 +14,16 @@
  */
 
 import type { AssistantMessage } from "@mariozechner/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import {
+	type BashOperations,
+	type ExtensionAPI,
+	type ExtensionContext,
+} from "@mariozechner/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
+import { resolve as resolvePath } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -52,6 +58,100 @@ function normalizeBranch(branch: string | null | undefined): string | null {
 	return value;
 }
 
+interface ParsedCdCommand {
+	rawTarget: string;
+	target: string | null;
+	usePrevious: boolean;
+}
+
+interface BashExecResult {
+	output: string;
+	exitCode: number | undefined;
+	cancelled: boolean;
+	truncated: boolean;
+	fullOutputPath?: string;
+}
+
+interface BashExecutionMessageLike {
+	role: "bashExecution";
+	command: string;
+	exitCode: number | undefined;
+	cancelled: boolean;
+	timestamp: number;
+}
+
+function isBashExecutionMessageLike(message: unknown): message is BashExecutionMessageLike {
+	if (!message || typeof message !== "object") return false;
+	const value = message as Partial<BashExecutionMessageLike>;
+	return (
+		value.role === "bashExecution"
+		&& typeof value.command === "string"
+		&& typeof value.cancelled === "boolean"
+		&& typeof value.timestamp === "number"
+	);
+}
+
+function parseCdCommand(command: string): ParsedCdCommand | null {
+	const trimmed = command.trim();
+	const match = trimmed.match(/^cd(?:\s+(.+))?$/);
+	if (!match) return null;
+
+	let target = (match[1] ?? "~").trim();
+	if (!target) target = "~";
+	if (/[;&|`\n]/.test(target)) return null;
+
+	if (
+		(target.startsWith('"') && target.endsWith('"'))
+		|| (target.startsWith("'") && target.endsWith("'"))
+	) {
+		target = target.slice(1, -1);
+	}
+
+	if (target === "-") return { rawTarget: target, target: null, usePrevious: true };
+	if (target === "~") return { rawTarget: target, target: homedir(), usePrevious: false };
+	if (target.startsWith("~/")) {
+		return { rawTarget: target, target: resolvePath(homedir(), target.slice(2)), usePrevious: false };
+	}
+
+	return { rawTarget: target, target, usePrevious: false };
+}
+
+function resolveTrackedCwdState(ctx: ExtensionContext): { cwd: string; previousCwd: string | null } {
+	let cwd = ctx.cwd;
+	let previousCwd: string | null = null;
+
+	for (const entry of ctx.sessionManager.getBranch()) {
+		if (entry.type !== "message") continue;
+		if (!isBashExecutionMessageLike(entry.message)) continue;
+		if (entry.message.cancelled || entry.message.exitCode !== 0) continue;
+
+		const parsed = parseCdCommand(entry.message.command);
+		if (!parsed) continue;
+
+		if (parsed.usePrevious) {
+			if (!previousCwd) continue;
+			[cwd, previousCwd] = [previousCwd, cwd];
+			continue;
+		}
+
+		previousCwd = cwd;
+		cwd = resolvePath(cwd, parsed.target!);
+	}
+
+	return { cwd, previousCwd };
+}
+
+function getLatestBashSignature(ctx: ExtensionContext): string {
+	const branch = ctx.sessionManager.getBranch();
+	for (let i = branch.length - 1; i >= 0; i -= 1) {
+		const entry = branch[i];
+		if (entry.type !== "message") continue;
+		if (!isBashExecutionMessageLike(entry.message)) continue;
+		return `${entry.message.timestamp}:${entry.message.command}:${entry.message.exitCode ?? ""}:${entry.message.cancelled ? 1 : 0}`;
+	}
+	return "";
+}
+
 interface PrLookup {
 	url: string | null;
 	headRefOid: string | null;
@@ -84,6 +184,146 @@ async function fetchLatestOpenPr(cwd: string, branch: string): Promise<PrLookup>
 	} catch {
 		return { url: null, headRefOid: null };
 	}
+}
+
+async function fetchGitBranch(cwd: string): Promise<string | null> {
+	try {
+		const { stdout } = await execFileAsync("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], {
+			cwd,
+			timeout: 3000,
+			maxBuffer: 1024 * 1024,
+		});
+		return normalizeBranch(stdout);
+	} catch {
+		return null;
+	}
+}
+
+async function handleCdCommand(
+	command: string,
+	cwd: string,
+	previousCwd: string | null,
+): Promise<{ cwd: string; previousCwd: string | null; result: BashExecResult } | null> {
+	const parsed = parseCdCommand(command);
+	if (!parsed) return null;
+
+	if (parsed.usePrevious) {
+		if (!previousCwd) {
+			return {
+				cwd,
+				previousCwd,
+				result: { output: "bash: cd: OLDPWD not set", exitCode: 1, cancelled: false, truncated: false },
+			};
+		}
+
+		return {
+			cwd: previousCwd,
+			previousCwd: cwd,
+			result: { output: `${previousCwd}\n`, exitCode: 0, cancelled: false, truncated: false },
+		};
+	}
+
+	const nextCwd = resolvePath(cwd, parsed.target!);
+
+	try {
+		const nextStat = await stat(nextCwd);
+		if (!nextStat.isDirectory()) {
+			return {
+				cwd,
+				previousCwd,
+				result: {
+					output: `bash: cd: ${parsed.rawTarget}: Not a directory`,
+					exitCode: 1,
+					cancelled: false,
+					truncated: false,
+				},
+			};
+		}
+	} catch (error) {
+		const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+		const message = code === "ENOENT" ? "No such file or directory" : "Unable to access directory";
+		return {
+			cwd,
+			previousCwd,
+			result: {
+				output: `bash: cd: ${parsed.rawTarget}: ${message}`,
+				exitCode: 1,
+				cancelled: false,
+				truncated: false,
+			},
+		};
+	}
+
+	return {
+		cwd: nextCwd,
+		previousCwd: cwd,
+		result: { output: "", exitCode: 0, cancelled: false, truncated: false },
+	};
+}
+
+function killShell(child: ReturnType<typeof spawn>) {
+	if (!child.pid) return;
+	try {
+		process.kill(-child.pid, "SIGTERM");
+	} catch {
+		child.kill("SIGTERM");
+	}
+}
+
+function createTrackedBashOperations(getCwd: () => string): BashOperations {
+	return {
+		exec(command, _cwd, { onData, signal, timeout, env }) {
+			return new Promise((resolve, reject) => {
+				const shell = process.env.SHELL || "/bin/bash";
+				const child = spawn(shell, ["-lc", command], {
+					cwd: getCwd(),
+					env: env ?? process.env,
+					stdio: ["ignore", "pipe", "pipe"],
+					detached: true,
+				});
+
+				let settled = false;
+				let timeoutId: NodeJS.Timeout | undefined;
+
+				const cleanup = () => {
+					if (timeoutId) clearTimeout(timeoutId);
+					if (signal) signal.removeEventListener("abort", onAbort);
+				};
+
+				const finish = (fn: () => void) => {
+					if (settled) return;
+					settled = true;
+					cleanup();
+					fn();
+				};
+
+				const onAbort = () => killShell(child);
+
+				child.stdout?.on("data", onData);
+				child.stderr?.on("data", onData);
+
+				child.on("error", (error) => {
+					finish(() => reject(error));
+				});
+
+				child.on("close", (code) => {
+					finish(() => resolve({ exitCode: code }));
+				});
+
+				if (timeout !== undefined && timeout > 0) {
+					timeoutId = setTimeout(() => {
+						killShell(child);
+						finish(() => reject(new Error(`timeout:${timeout}`)));
+					}, timeout * 1000);
+				}
+
+				if (signal) {
+					if (signal.aborted) onAbort();
+					else signal.addEventListener("abort", onAbort, { once: true });
+				}
+			});
+		},
+	};
 }
 
 async function fetchLocalGitState(
@@ -177,21 +417,19 @@ function computeStats(ctx: ExtensionContext): TokenStats {
 }
 
 function renderRow1(
-	ctx: ExtensionContext,
+	cwd: string,
+	branch: string | null,
 	prUrl: string | null,
-	prBranch: string | null,
 	localHeadOid: string | null,
 	prHeadOid: string | null,
 	dirty: boolean,
 	ahead: number,
-	footerData: any,
 	theme: any,
 	width: number,
 ): string {
-	const branch = normalizeBranch(footerData.getGitBranch());
 	const branchStr = branch ? ` (${branch})` : "";
-	const left = theme.fg("dim", `${shortenHome(ctx.cwd)}${branchStr}`);
-	const showPrUrl = branch && prBranch === branch ? prUrl : null;
+	const left = theme.fg("dim", `${shortenHome(cwd)}${branchStr}`);
+	const showPrUrl = branch ? prUrl : null;
 	const state = formatPushState(dirty, ahead, localHeadOid, prHeadOid);
 	const label = showPrUrl ? formatPrLabel(showPrUrl) : "";
 	const right = showPrUrl
@@ -228,35 +466,76 @@ function renderRow2(ctx: ExtensionContext, pi: ExtensionAPI, theme: any, width: 
 }
 
 export default function (pi: ExtensionAPI) {
+	let trackedCwd: string | null = null;
+	let previousTrackedCwd: string | null = null;
+	const trackedBashOperations = createTrackedBashOperations(() => trackedCwd ?? process.cwd());
 	let prUrl: string | null = null;
-	let prBranch: string | null = null;
 	let prHeadOid: string | null = null;
 	let localHeadOid: string | null = null;
 	let localDirty = false;
 	let localAhead = -1;
 	let currentBranch: string | null = null;
+	let lastRefreshSignature: string | null = null;
+	let refreshVersion = 0;
 	let requestRender: (() => void) | null = null;
 
-	async function refreshPrUrl(ctx: ExtensionContext, branch: string | null) {
-		if (!branch) {
-			prUrl = null;
-			prBranch = null;
-			prHeadOid = null;
-			localHeadOid = null;
-			localDirty = false;
-			localAhead = -1;
-			requestRender?.();
-			return;
-		}
+	function clearGitState() {
+		prUrl = null;
+		prHeadOid = null;
+		localHeadOid = null;
+		localDirty = false;
+		localAhead = -1;
+		currentBranch = null;
+	}
 
-		const [pr, local] = await Promise.all([fetchLatestOpenPr(ctx.cwd, branch), fetchLocalGitState(ctx.cwd)]);
+	function syncTrackedCwd(ctx: ExtensionContext) {
+		const state = resolveTrackedCwdState(ctx);
+		trackedCwd = state.cwd;
+		previousTrackedCwd = state.previousCwd;
+	}
+
+	function getCurrentCwd(ctx: ExtensionContext): string {
+		return trackedCwd ?? resolveTrackedCwdState(ctx).cwd;
+	}
+
+	function setTrackedCwd(nextCwd: string, previousCwd: string | null) {
+		if (trackedCwd === nextCwd && previousTrackedCwd === previousCwd) return;
+		trackedCwd = nextCwd;
+		previousTrackedCwd = previousCwd;
+		lastRefreshSignature = null;
+		clearGitState();
+		requestRender?.();
+	}
+
+	async function refreshFooterState(ctx: ExtensionContext) {
+		const cwd = getCurrentCwd(ctx);
+		const version = ++refreshVersion;
+		const [branch, local] = await Promise.all([fetchGitBranch(cwd), fetchLocalGitState(cwd)]);
+		const pr = branch ? await fetchLatestOpenPr(cwd, branch) : { url: null, headRefOid: null };
+
+		if (version !== refreshVersion) return;
+
+		trackedCwd = cwd;
+		currentBranch = branch;
 		prUrl = pr.url;
-		prBranch = branch;
 		prHeadOid = pr.headRefOid;
 		localHeadOid = local.headOid;
 		localDirty = local.dirty;
 		localAhead = local.ahead;
 		requestRender?.();
+	}
+
+	function ensureFreshFooterState(ctx: ExtensionContext) {
+		const signature = `${getCurrentCwd(ctx)}|${getLatestBashSignature(ctx)}`;
+		if (signature === lastRefreshSignature) return;
+		lastRefreshSignature = signature;
+		void refreshFooterState(ctx);
+	}
+
+	function resetFooterState() {
+		trackedCwd = null;
+		previousTrackedCwd = null;
+		clearGitState();
 	}
 
 	function installFooter(ctx: ExtensionContext) {
@@ -265,23 +544,25 @@ export default function (pi: ExtensionAPI) {
 			requestRender = rerender;
 
 			const updateBranch = () => {
-				currentBranch = normalizeBranch(footerData.getGitBranch());
-				void refreshPrUrl(ctx, currentBranch);
+				lastRefreshSignature = null;
+				void refreshFooterState(ctx);
 				rerender();
 			};
 
 			const unsub = footerData.onBranchChange(updateBranch);
-			updateBranch();
+			ensureFreshFooterState(ctx);
 
 			return {
 				dispose() {
 					if (requestRender === rerender) requestRender = null;
+					resetFooterState();
 					unsub();
 				},
 				invalidate() {},
 				render(width: number): string[] {
+					ensureFreshFooterState(ctx);
 					return [
-						renderRow1(ctx, prUrl, prBranch, localHeadOid, prHeadOid, localDirty, localAhead, footerData, theme, width),
+						renderRow1(getCurrentCwd(ctx), currentBranch, prUrl, localHeadOid, prHeadOid, localDirty, localAhead, theme, width),
 						renderRow2(ctx, pi, theme, width),
 					];
 				},
@@ -290,10 +571,31 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
+		syncTrackedCwd(ctx);
 		installFooter(ctx);
 	});
 
+	pi.on("session_switch", async (_event, ctx) => {
+		lastRefreshSignature = null;
+		syncTrackedCwd(ctx);
+		await refreshFooterState(ctx);
+	});
+
+	pi.on("user_bash", async (event, ctx) => {
+		const cwd = getCurrentCwd(ctx);
+		const handledCd = await handleCdCommand(event.command, cwd, previousTrackedCwd);
+		if (handledCd) {
+			setTrackedCwd(handledCd.cwd, handledCd.previousCwd);
+			await refreshFooterState(ctx);
+			return { result: handledCd.result };
+		}
+
+		return { operations: trackedBashOperations };
+	});
+
 	pi.on("agent_end", async (_event, ctx) => {
-		await refreshPrUrl(ctx, currentBranch);
+		lastRefreshSignature = null;
+		syncTrackedCwd(ctx);
+		await refreshFooterState(ctx);
 	});
 }
