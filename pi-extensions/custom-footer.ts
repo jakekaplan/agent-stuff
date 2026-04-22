@@ -469,6 +469,7 @@ export default function (pi: ExtensionAPI) {
 	let trackedCwd: string | null = null;
 	let previousTrackedCwd: string | null = null;
 	const trackedBashOperations = createTrackedBashOperations(() => trackedCwd ?? process.cwd());
+	let runtimeActive = true;
 	let prUrl: string | null = null;
 	let prHeadOid: string | null = null;
 	let localHeadOid: string | null = null;
@@ -508,12 +509,13 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function refreshFooterState(ctx: ExtensionContext) {
+		if (!runtimeActive) return;
 		const cwd = getCurrentCwd(ctx);
 		const version = ++refreshVersion;
 		const [branch, local] = await Promise.all([fetchGitBranch(cwd), fetchLocalGitState(cwd)]);
 		const pr = branch ? await fetchLatestOpenPr(cwd, branch) : { url: null, headRefOid: null };
 
-		if (version !== refreshVersion) return;
+		if (!runtimeActive || version !== refreshVersion) return;
 
 		trackedCwd = cwd;
 		currentBranch = branch;
@@ -526,6 +528,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function ensureFreshFooterState(ctx: ExtensionContext) {
+		if (!runtimeActive) return;
 		const signature = `${getCurrentCwd(ctx)}|${getLatestBashSignature(ctx)}`;
 		if (signature === lastRefreshSignature) return;
 		lastRefreshSignature = signature;
@@ -533,6 +536,8 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function resetFooterState() {
+		lastRefreshSignature = null;
+		refreshVersion += 1;
 		trackedCwd = null;
 		previousTrackedCwd = null;
 		clearGitState();
@@ -540,10 +545,12 @@ export default function (pi: ExtensionAPI) {
 
 	function installFooter(ctx: ExtensionContext) {
 		ctx.ui.setFooter((tui, theme, footerData) => {
+			let footerActive = true;
 			const rerender = () => tui.requestRender();
 			requestRender = rerender;
 
 			const updateBranch = () => {
+				if (!runtimeActive || !footerActive) return;
 				lastRefreshSignature = null;
 				void refreshFooterState(ctx);
 				rerender();
@@ -554,12 +561,14 @@ export default function (pi: ExtensionAPI) {
 
 			return {
 				dispose() {
+					footerActive = false;
 					if (requestRender === rerender) requestRender = null;
 					resetFooterState();
 					unsub();
 				},
 				invalidate() {},
 				render(width: number): string[] {
+					if (!runtimeActive || !footerActive) return [];
 					ensureFreshFooterState(ctx);
 					return [
 						renderRow1(getCurrentCwd(ctx), currentBranch, prUrl, localHeadOid, prHeadOid, localDirty, localAhead, theme, width),
@@ -571,8 +580,14 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
+		runtimeActive = true;
 		syncTrackedCwd(ctx);
 		installFooter(ctx);
+	});
+
+	pi.on("session_shutdown", async () => {
+		runtimeActive = false;
+		refreshVersion += 1;
 	});
 
 	pi.on("session_switch", async (_event, ctx) => {
