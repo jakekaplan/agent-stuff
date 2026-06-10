@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo "usage: pir <github-pr-url>" >&2
+}
+
+url="${1:-}"
+if [[ -z "$url" ]]; then
+  usage
+  exit 2
+fi
+
+if [[ ! "$url" =~ ^https://github\.com/([^/]+)/([^/]+)/pull/([0-9]+)(/.*|\?.*)?$ ]]; then
+  echo "pir: not a GitHub PR URL: $url" >&2
+  usage
+  exit 2
+fi
+
+owner="${BASH_REMATCH[1]}"
+repo="${BASH_REMATCH[2]}"
+pr="${BASH_REMATCH[3]}"
+
+for cmd in gh git pi; do
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "pir: missing required command: $cmd" >&2
+    exit 1
+  fi
+done
+
+root="$HOME/PycharmProjects/pr-reviews"
+mkdir -p "$root"
+
+checkout="$(mktemp -d "$root/${owner}-${repo}-${pr}.XXXXXX")/$repo"
+
+echo "pir: cloning $owner/$repo PR #$pr"
+echo "pir: checkout $checkout"
+
+gh repo clone "$owner/$repo" "$checkout" -- --filter=blob:none
+
+cd "$checkout"
+exec pi --approve --name "review $owner/$repo#$pr" "/review pr $url"
