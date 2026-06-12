@@ -31,7 +31,16 @@ done
 root="$HOME/PycharmProjects/pr-reviews"
 mkdir -p "$root"
 
-checkout="$(mktemp -d "$root/${owner}-${repo}-${pr}.XXXXXX")/$repo"
+tmp="$(mktemp -d "$root/${owner}-${repo}-${pr}.XXXXXX")"
+checkout="$tmp/$repo"
+
+cleanup() {
+  cd / >/dev/null 2>&1 || true
+  rm -rf "$tmp"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 echo "pir: cloning $owner/$repo PR #$pr"
 echo "pir: checkout $checkout"
@@ -39,4 +48,4 @@ echo "pir: checkout $checkout"
 gh repo clone "$owner/$repo" "$checkout" -- --filter=blob:none
 
 cd "$checkout"
-exec pi --approve --name "review $owner/$repo#$pr" "/review pr $url"
+pi --approve --name "review $owner/$repo#$pr" "/review pr $url"
