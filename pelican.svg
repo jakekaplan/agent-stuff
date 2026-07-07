@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Pelican illustration</title>
+  <desc id="desc">A flat vector pelican with a large orange beak, yellow throat pouch, white body, gray wing, legs, feet, and eye.</desc>
+
+  <!-- palette: sky #e7f7fb, outline #31424a, white #fbfdf8, wing #8ea0a8, beak #f2a33a, pouch #f1c772, legs #d87934 -->
+  <g id="background">
+    <circle cx="256" cy="256" r="230" fill="#e7f7fb"/>
+    <ellipse cx="256" cy="413" rx="155" ry="22" fill="#bde8ef"/>
+  </g>
+
+  <g id="legs-and-feet" fill="#d87934" stroke="#31424a" stroke-width="5" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M198 357 L195 415"/>
+    <path d="M251 358 L257 416"/>
+    <path d="M191 415 C173 410 158 416 149 429 C169 432 192 430 207 420 Z"/>
+    <path d="M257 416 C241 421 231 434 233 448 C254 442 273 431 285 417 Z"/>
+  </g>
+
+  <g id="body" stroke="#31424a" stroke-width="6" stroke-linejoin="round">
+    <path fill="#fbfdf8" d="M111 324 C95 258 141 205 217 202 C290 199 354 238 359 300 C365 373 303 411 224 407 C159 404 124 377 111 324 Z"/>
+    <path fill="#fbfdf8" d="M124 292 C94 280 68 285 49 304 C77 309 101 323 124 345 Z"/>
+    <path fill="#8ea0a8" d="M164 281 C190 238 261 235 312 277 C291 335 244 363 177 357 C154 337 149 309 164 281 Z"/>
+    <path fill="none" stroke="#6f828a" stroke-width="5" stroke-linecap="round" d="M184 297 C216 304 250 292 283 270"/>
+    <path fill="none" stroke="#6f828a" stroke-width="5" stroke-linecap="round" d="M179 326 C214 334 253 325 293 299"/>
+  </g>
+
+  <g id="neck-and-head" stroke="#31424a" stroke-width="6" stroke-linejoin="round">
+    <path fill="#fbfdf8" d="M245 261 C231 238 229 205 242 181 C253 160 275 154 288 168 C272 190 270 222 286 254 C275 265 257 268 245 261 Z"/>
+    <path fill="#fbfdf8" d="M239 149 C242 125 262 109 288 113 C312 117 327 134 326 155 C325 178 303 192 275 187 C250 182 236 169 239 149 Z"/>
+    <path fill="#fbfdf8" d="M245 132 C232 122 221 121 210 130 C222 133 235 141 243 152 Z"/>
+  </g>
+
+  <g id="beak-and-pouch" stroke="#31424a" stroke-width="6" stroke-linejoin="round" stroke-linecap="round">
+    <path fill="#f1c772" d="M294 157 C340 165 404 162 459 149 C462 181 433 215 380 223 C338 230 303 207 286 170 Z"/>
+    <path fill="#f2a33a" d="M292 135 C346 120 414 121 464 136 C474 139 474 150 463 154 C407 164 343 164 289 154 Z"/>
+    <path fill="none" stroke="#b76b24" stroke-width="4" d="M306 153 C354 156 407 152 458 143"/>
+    <circle cx="444" cy="140" r="4" fill="#b76b24" stroke="none"/>
+  </g>
+
+  <g id="face">
+    <circle cx="282" cy="139" r="5.5" fill="#17252b"/>
+    <circle cx="284" cy="137" r="1.7" fill="#ffffff"/>
+  </g>
+</svg>
