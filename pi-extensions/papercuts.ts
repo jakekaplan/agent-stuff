@@ -10,7 +10,7 @@ import {
 } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
 
-const PAPERCUTS_PATH = join(homedir(), "PycharmProjects", "papercuts", "PAPERCUTS.md");
+const PAPERCUTS_PATH = join(homedir(), "PAPERCUTS.md");
 const MAX_BLOCK_CHARS = 4_000;
 const MAX_TRANSCRIPT_CHARS = 300_000;
 const REVIEW_MODELS = [
