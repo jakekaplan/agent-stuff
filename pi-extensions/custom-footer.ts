@@ -13,14 +13,15 @@
  * PR link resolved via GitHub CLI; push state via git upstream tracking.
  */
 
-import type { AssistantMessage } from "@mariozechner/pi-ai";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import {
 	type BashOperations,
+	createLocalBashOperations,
 	type ExtensionAPI,
 	type ExtensionContext,
-} from "@mariozechner/pi-coding-agent";
-import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
-import { execFile, spawn } from "node:child_process";
+} from "@earendil-works/pi-coding-agent";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { execFile } from "node:child_process";
 import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { resolve as resolvePath } from "node:path";
@@ -261,67 +262,11 @@ async function handleCdCommand(
 	};
 }
 
-function killShell(child: ReturnType<typeof spawn>) {
-	if (!child.pid) return;
-	try {
-		process.kill(-child.pid, "SIGTERM");
-	} catch {
-		child.kill("SIGTERM");
-	}
-}
-
 function createTrackedBashOperations(getCwd: () => string): BashOperations {
+	const localBashOperations = createLocalBashOperations();
 	return {
-		exec(command, _cwd, { onData, signal, timeout, env }) {
-			return new Promise((resolve, reject) => {
-				const shell = process.env.SHELL || "/bin/bash";
-				const child = spawn(shell, ["-lc", command], {
-					cwd: getCwd(),
-					env: env ?? process.env,
-					stdio: ["ignore", "pipe", "pipe"],
-					detached: true,
-				});
-
-				let settled = false;
-				let timeoutId: NodeJS.Timeout | undefined;
-
-				const cleanup = () => {
-					if (timeoutId) clearTimeout(timeoutId);
-					if (signal) signal.removeEventListener("abort", onAbort);
-				};
-
-				const finish = (fn: () => void) => {
-					if (settled) return;
-					settled = true;
-					cleanup();
-					fn();
-				};
-
-				const onAbort = () => killShell(child);
-
-				child.stdout?.on("data", onData);
-				child.stderr?.on("data", onData);
-
-				child.on("error", (error) => {
-					finish(() => reject(error));
-				});
-
-				child.on("close", (code) => {
-					finish(() => resolve({ exitCode: code }));
-				});
-
-				if (timeout !== undefined && timeout > 0) {
-					timeoutId = setTimeout(() => {
-						killShell(child);
-						finish(() => reject(new Error(`timeout:${timeout}`)));
-					}, timeout * 1000);
-				}
-
-				if (signal) {
-					if (signal.aborted) onAbort();
-					else signal.addEventListener("abort", onAbort, { once: true });
-				}
-			});
+		exec(command, _cwd, options) {
+			return localBashOperations.exec(command, getCwd(), options);
 		},
 	};
 }
@@ -588,12 +533,6 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		runtimeActive = false;
 		refreshVersion += 1;
-	});
-
-	pi.on("session_switch", async (_event, ctx) => {
-		lastRefreshSignature = null;
-		syncTrackedCwd(ctx);
-		await refreshFooterState(ctx);
 	});
 
 	pi.on("user_bash", async (event, ctx) => {
