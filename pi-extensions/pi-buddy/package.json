@@ -1,0 +1,8 @@
+{
+  "name": "pi-buddy",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "sharp": ">=0.35.4"
+  }
+}
