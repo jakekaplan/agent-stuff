@@ -9,7 +9,6 @@ interface Reaction {
 	text: string;
 	source: "reply" | "action";
 	description: string;
-	revision: number;
 	ctx: ExtensionContext;
 }
 
@@ -30,7 +29,6 @@ function latestReply(ctx: ExtensionContext): { id: string; text: string } | unde
 export default function piBuddy(pi: ExtensionAPI) {
 	let settings: Settings = { description: "", enabled: false, position: "bottom-right" };
 	let live = false;
-	let revision = 0;
 	let lastReply: string | undefined;
 	let queued: Reaction | undefined;
 	let active: AbortController | undefined;
@@ -40,7 +38,6 @@ export default function piBuddy(pi: ExtensionAPI) {
 	let buddy: Buddy | undefined;
 
 	function cancel() {
-		revision++;
 		queued = undefined;
 		active?.abort();
 		buddy?.hide();
@@ -118,10 +115,10 @@ export default function piBuddy(pi: ExtensionAPI) {
 				const controller = new AbortController();
 				active = controller;
 				const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(180_000)]);
-				const current = () => live && !signal.aborted && reaction.revision === revision;
+				const current = () => live && !signal.aborted;
 				try {
 					buddy ??= showBuddy(ctx, settings.position);
-					buddy.update("...");
+					buddy.update({ status: "loading" });
 					const emotions = await readEmotions(signal);
 					const selected = (reaction.source === "action" ? emotions.find((entry) => entry.id === reaction.text) : undefined)
 						?? await selectEmotion(reaction.text, reaction.source, emotions, ctx, signal);
@@ -134,14 +131,14 @@ export default function piBuddy(pi: ExtensionAPI) {
 					if (!sprite) sprite = await generateSprite(reaction.description, emotion, ctx, signal);
 					signal.throwIfAborted();
 					if (!current()) continue;
-					buddy.update(emotion.id, sprite);
+					buddy.update({ status: "ready", emotion: emotion.id, frames: sprite.frames });
 					if (reaction.source === "action") ctx.ui.notify(`Pi Buddy ${emotion.id}: ${sprite.directory}`, "info");
-					if (!getCapabilities().images) ctx.ui.notify("Pi Buddy's PNGs are available on disk, but this terminal cannot display inline images.", "warning");
+					if (!getCapabilities().images) ctx.ui.notify("This terminal cannot display images. PNGs are saved on disk.", "warning");
 				} catch (error) {
-					if (live && !controller.signal.aborted && reaction.revision === revision) {
+					if (live && !controller.signal.aborted) {
 						const message = signal.aborted ? "Timed out after three minutes; no retry was made."
 							: error instanceof Error ? error.message : "Generation failed.";
-						buddy?.update("Update failed");
+						buddy?.update({ status: "failed" });
 						ctx.ui.notify(`Pi Buddy: ${message}`, "warning");
 					}
 				} finally {
@@ -156,13 +153,13 @@ export default function piBuddy(pi: ExtensionAPI) {
 
 	function enqueue(text: string, source: Reaction["source"], ctx: ExtensionContext) {
 		if (paused) return;
-		queued = { text, source, ctx, description: settings.description, revision };
+		queued = { text, source, ctx, description: settings.description };
 		if (running) return;
 		running = true;
 		// Never return this promise to an agent event: chat must not wait for the avatar.
 		draining = drain().catch((error: unknown) => {
 			if (live) {
-				buddy?.update("Update failed");
+				buddy?.update({ status: "failed" });
 				ctx.ui.notify(`Pi Buddy: ${error instanceof Error ? error.message : "Background update failed."}`, "warning");
 			}
 		});

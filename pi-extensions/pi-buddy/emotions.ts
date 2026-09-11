@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { getAgentDir, withFileMutationQueue, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { withFileLock } from "./file-lock.ts";
 
 const DATA = join(getAgentDir(), "pi-buddy");
 const CUSTOM = join(DATA, "custom-emotions.json");
@@ -43,12 +44,11 @@ async function readDefaults(signal: AbortSignal): Promise<Emotion[]> {
 	return emotions;
 }
 
-// Callers hold CUSTOM's mutation queue; rename publishes complete JSON atomically.
+// Callers hold CUSTOM's lock; rename publishes complete JSON atomically.
 async function writeCustom(emotions: Emotion[], signal: AbortSignal): Promise<void> {
 	const temporary = join(DATA, `.custom-emotions-${randomUUID()}.json`);
 	try {
 		signal.throwIfAborted();
-		await mkdir(DATA, { recursive: true, mode: 0o700 });
 		await writeFile(temporary, `${JSON.stringify(emotions, null, 2)}\n`, { flag: "wx", mode: 0o600, signal });
 		signal.throwIfAborted();
 		await rename(temporary, CUSTOM);
@@ -84,24 +84,23 @@ async function readCustom(defaults: Emotion[], signal: AbortSignal): Promise<Emo
 
 export async function readEmotions(signal: AbortSignal): Promise<Emotion[]> {
 	const defaults = await readDefaults(signal);
-	return withFileMutationQueue(CUSTOM, async () => [...defaults, ...await readCustom(defaults, signal)]);
+	return withFileLock(CUSTOM, async (signal) => [...defaults, ...await readCustom(defaults, signal)], signal);
 }
 
 export async function addEmotion(value: Emotion, signal: AbortSignal): Promise<Emotion> {
 	const emotion = parseEmotion(value);
 	const defaults = await readDefaults(signal);
-	return withFileMutationQueue(CUSTOM, async () => {
-		signal.throwIfAborted();
+	return withFileLock(CUSTOM, async (signal) => {
 		const custom = await readCustom(defaults, signal);
 		const existing = [...defaults, ...custom].find((entry) => entry.id === emotion.id || entry.action.toLowerCase() === emotion.action.toLowerCase());
 		if (existing) return existing;
 		await writeCustom([...custom, emotion], signal);
 		return emotion;
-	});
+	}, signal);
 }
 
 export async function resetEmotions(signal: AbortSignal): Promise<void> {
-	await withFileMutationQueue(CUSTOM, () => writeCustom([], signal));
+	await withFileLock(CUSTOM, (signal) => writeCustom([], signal), signal);
 }
 
 export async function selectEmotion(text: string, source: "reply" | "action", emotions: Emotion[], ctx: ExtensionContext, signal: AbortSignal): Promise<Emotion> {

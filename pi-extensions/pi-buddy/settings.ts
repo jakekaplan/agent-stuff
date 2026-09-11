@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { getAgentDir, withFileMutationQueue, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { withFileLock } from "./file-lock.ts";
 
 const FILE = join(getAgentDir(), "pi-buddy.json");
 const positions = [
@@ -34,7 +35,9 @@ export function parseSettings(value: unknown): Settings {
 	}
 	const description = value.description.trim();
 	if (value.enabled && !description) throw new Error("Choose an avatar first using /pi-buddy.");
-	const corner = "position" in value ? value.position : "bottom-right";
+	const savedPosition = "position" in value ? value.position : "bottom-right";
+	// Preferences saved during the dock experiment map back to the bottom corners.
+	const corner = savedPosition === "left" ? "bottom-left" : savedPosition === "right" ? "bottom-right" : savedPosition;
 	const position = positions.find((entry) => entry.value === corner)?.value;
 	if (!position) throw new Error(`Invalid Pi Buddy position in ${FILE}. Choose one of the four corners.`);
 	return { description, enabled: value.enabled, position };
@@ -52,12 +55,12 @@ export async function readSettings(): Promise<Settings> {
 }
 
 export async function saveSettings(change: Partial<Settings>): Promise<Settings> {
-	return withFileMutationQueue(FILE, async () => {
+	return withFileLock(FILE, async (signal) => {
 		const settings = parseSettings({ ...await readSettings(), ...change });
-		await mkdir(getAgentDir(), { recursive: true });
 		const temporary = join(getAgentDir(), `.pi-buddy-${randomUUID()}.json`);
 		try {
-			await writeFile(temporary, `${JSON.stringify(settings, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+			await writeFile(temporary, `${JSON.stringify(settings, null, 2)}\n`, { flag: "wx", mode: 0o600, signal });
+			signal.throwIfAborted();
 			await rename(temporary, FILE);
 		} finally {
 			await rm(temporary, { force: true });

@@ -1,13 +1,18 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { allocateImageId, getCapabilities, Image, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { Position } from "./settings.ts";
-import type { Sprite } from "./sprites.ts";
 
 const WIDGET = "pi-buddy";
 const FPS = 8;
+const loadingFrames = ["●··", "·●·", "··●"];
+
+type State =
+	| { status: "loading" }
+	| { status: "ready"; emotion: string; frames: string[] }
+	| { status: "failed" };
 
 export interface Buddy {
-	update(progress: string, sprite?: Sprite): void;
+	update(state: State): void;
 	move(position: Position): void;
 	hide(): void;
 }
@@ -17,10 +22,9 @@ export function showBuddy(ctx: ExtensionContext, position: Position): Buddy {
 	ctx.ui.setWidget(WIDGET, (tui, theme) => {
 		const imageId = allocateImageId();
 		let images: Image[] = [];
-		let progress = "...";
+		let state: State = { status: "loading" };
 		let frame = 0;
 		let timer: ReturnType<typeof setInterval> | undefined;
-		const loadingFrames = ["●··", "·●·", "··●"];
 		let loadingFrame = 0;
 		let loadingTimer: ReturnType<typeof setInterval> | undefined;
 		const panel = {
@@ -34,7 +38,8 @@ export function showBuddy(ctx: ExtensionContext, position: Position): Buddy {
 				};
 				const imageLines = images.length > 0 ? images[frame].render(innerWidth)
 					: Array.from({ length: 10 }, () => "");
-				const label = progress === "..." ? loadingFrames[loadingFrame] : progress;
+				const label = state.status === "loading" ? loadingFrames[loadingFrame]
+					: state.status === "ready" ? state.emotion : "Update failed";
 				return [
 					border("╭" + "─".repeat(innerWidth) + "╮"),
 					...imageLines.map(row),
@@ -55,9 +60,9 @@ export function showBuddy(ctx: ExtensionContext, position: Position): Buddy {
 		});
 		let overlay = place();
 		buddy = {
-			update(nextProgress, sprite) {
-				progress = nextProgress;
-				if (progress === "...") {
+			update(next) {
+				state = next;
+				if (state.status === "loading") {
 					if (!loadingTimer) {
 						loadingFrame = 0;
 						loadingTimer = setInterval(() => {
@@ -70,8 +75,8 @@ export function showBuddy(ctx: ExtensionContext, position: Position): Buddy {
 					clearInterval(loadingTimer);
 					loadingTimer = undefined;
 				}
-				if (sprite) {
-					images = sprite.frames.map((data) => new Image(data, "image/png", {
+				if (state.status === "ready") {
+					images = state.frames.map((data) => new Image(data, "image/png", {
 						fallbackColor: (text) => theme.fg("muted", text),
 					}, { maxWidthCells: 22, maxHeightCells: 10, imageId }));
 					frame = 0;

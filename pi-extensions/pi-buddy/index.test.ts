@@ -1,230 +1,12 @@
-// Run: node --experimental-vm-modules --experimental-strip-types --test index.test.ts
+// Run: node --experimental-vm-modules --experimental-strip-types --test *.test.ts
 import assert from "node:assert/strict";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
-import { stripTypeScriptTypes } from "node:module";
-import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { test, type TestContext } from "node:test";
-import { setTimeout as delay } from "node:timers/promises";
-import { createContext, SourceTextModule, SyntheticModule } from "node:vm";
+import { test } from "node:test";
+import { stripVTControlCharacters } from "node:util";
 import sharp from "sharp";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-
-const sheet = await sharp({ create: { width: 1008, height: 672, channels: 3, background: "#ddd" } }).png().toBuffer();
-const signal = () => new AbortController().signal;
-
-async function waitFor(predicate: () => boolean) {
-	const deadline = Date.now() + 5000;
-	while (!predicate()) {
-		assert.ok(Date.now() < deadline, "Timed out waiting for the buddy's background update");
-		await delay(10);
-	}
-}
-
-async function loadBuddy(t: TestContext, agentDir?: string) {
-	if (!agentDir) {
-		agentDir = await fs.mkdtemp(path.join(tmpdir(), "pi-buddy-test-"));
-		const temporary = agentDir;
-		t.after(() => fs.rm(temporary, { recursive: true, force: true }));
-		await fs.writeFile(path.join(agentDir, "pi-buddy.json"), JSON.stringify({ description: "a small robot", enabled: true }));
-	}
-	const model = {
-		output: '{"id":"happy"}', stopReason: "stop", available: true, calls: [] as any[],
-		beforeComplete: undefined as (() => Promise<void>) | undefined,
-	};
-	const image = { status: 200, calls: [] as any[] };
-	const io = {
-		beforeWrite: undefined as ((file: string) => void | Promise<void>) | undefined,
-		beforeRemove: undefined as ((file: string) => void | Promise<void>) | undefined,
-	};
-	const notifications: { text: string; level: string }[] = [];
-	const displayed: string[] = [];
-	const labels: string[] = [];
-	const dialogs = {
-		choices: [] as (number | string | undefined)[],
-		inputs: [] as (string | undefined)[],
-		confirmations: [] as boolean[],
-		shown: [] as { kind: string; title: string; options?: string[]; message?: string }[],
-	};
-	const capabilities = { images: false };
-	const overlays: { anchor: string; hidden: boolean }[] = [];
-	const timers = new Map<object, { callback: () => void; interval: number }>();
-	const handlers = new Map<string, (...args: any[]) => any>();
-	let command: any;
-	let widget: any;
-	let panel: any;
-	let progress = "";
-	let updates = 0;
-	const queues = new Map<string, Promise<unknown>>();
-	const pi = {
-		on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
-		registerCommand: (_name: string, definition: any) => { command = definition; },
-	};
-	const tui = {
-		showOverlay: (component: any, options: { anchor: string }) => {
-			panel = component;
-			const overlay = { anchor: options.anchor, hidden: false };
-			overlays.push(overlay);
-			return { hide() { overlay.hidden = true; } };
-		},
-		requestRender: () => {
-			const lines = panel.render(26);
-			const next = lines.at(-2).slice(1, -1).trim();
-			labels.push(next);
-			if (next !== progress && !["●··", "·●·", "··●"].includes(next) && next !== "Update failed") updates++;
-			progress = next;
-		},
-	};
-	const ctx = {
-		mode: "tui",
-		cwd: path.join(agentDir, "project"),
-		sessionManager: { getBranch: () => branch },
-		modelRegistry: {
-			find: () => model.available ? {} : undefined,
-			complete: async (_model: unknown, input: unknown, options: unknown) => {
-				model.calls.push({ input, options });
-				await model.beforeComplete?.();
-				return { stopReason: model.stopReason, content: [{ type: "text", text: model.output }] };
-			},
-			getProviderAuth: async () => ({ auth: { apiKey: `header.${Buffer.from(JSON.stringify({
-				"https://api.openai.com/auth": { chatgpt_account_id: "test" },
-			})).toString("base64url")}.signature` } }),
-		},
-		ui: {
-			select: async (title: string, options: string[]) => {
-				dialogs.shown.push({ kind: "select", title, options });
-				const choice = dialogs.choices.shift();
-				const selected = typeof choice === "number" ? options[choice] : choice;
-				if (choice !== undefined) assert.ok(selected !== undefined && options.includes(selected), `Invalid menu choice: ${choice}`);
-				return selected;
-			},
-			input: async (title: string) => {
-				dialogs.shown.push({ kind: "input", title });
-				return dialogs.inputs.shift();
-			},
-			confirm: async (title: string, message: string) => {
-				dialogs.shown.push({ kind: "confirm", title, message });
-				return dialogs.confirmations.shift() ?? false;
-			},
-			notify: (text: string, level: string) => notifications.push({ text, level }),
-			setWidget: (_name: string, factory: any) => {
-				widget?.dispose();
-				widget = factory?.(tui, { fg: (_color: string, text: string) => text });
-			},
-		},
-	};
-	let branch: any[] = [];
-	function settleReply(text: string) {
-		branch = [{ id: crypto.randomUUID(), type: "message", message: {
-			role: "assistant", stopReason: "stop", content: [{ type: "text", text }],
-		} }];
-		handlers.get("agent_settled")!({}, ctx);
-	}
-	const imports = {
-		"node:crypto": crypto,
-		"node:fs/promises": {
-			...fs,
-			writeFile: async (file: any, ...args: any[]) => {
-				await io.beforeWrite?.(String(file));
-				return (fs.writeFile as any)(file, ...args);
-			},
-			rm: async (file: any, ...args: any[]) => {
-				await io.beforeRemove?.(String(file));
-				return (fs.rm as any)(file, ...args);
-			},
-		},
-		"node:path": path,
-		"@earendil-works/pi-coding-agent": {
-			getAgentDir: () => agentDir,
-			withFileMutationQueue: async (file: string, fn: () => Promise<unknown>) => {
-				const pending = (queues.get(file) ?? Promise.resolve()).then(fn);
-				queues.set(file, pending.catch(() => {}));
-				return pending;
-			},
-		},
-		"@earendil-works/pi-tui": {
-			allocateImageId: () => 1,
-			getCapabilities: () => capabilities,
-			Image: class {
-				constructor(data: string) { displayed.push(data); }
-				render() { return ["sprite"]; }
-				invalidate() {}
-			},
-			truncateToWidth: (text: string, width: number) => text.slice(0, width),
-			visibleWidth: (text: string) => text.length,
-		},
-		sharp: { default: sharp },
-	};
-	const context = createContext({
-		Buffer, Error, URL, AbortSignal, AbortController,
-		setInterval: (callback: () => void, interval: number) => {
-			const timer = { unref() {} };
-			timers.set(timer, { callback, interval });
-			return timer;
-		},
-		clearInterval: (timer: object) => timers.delete(timer),
-		fetch: async (_url: string, options: any) => {
-			image.calls.push(JSON.parse(options.body));
-			return image.status === 200
-				? Response.json({ data: [{ b64_json: sheet.toString("base64") }] })
-				: new Response("", { status: image.status });
-		},
-	});
-	// Load real module exports, mocking only the Pi host and external I/O boundaries.
-	const modules = new Map<string, Promise<SourceTextModule>>();
-	function loadModule(url: URL): Promise<SourceTextModule> {
-		let pending = modules.get(url.href);
-		if (!pending) {
-			pending = fs.readFile(url, "utf8").then((source) => new SourceTextModule(stripTypeScriptTypes(source), {
-				context,
-				identifier: url.href,
-				initializeImportMeta: (meta) => { meta.url = url.href; },
-			}));
-			modules.set(url.href, pending);
-		}
-		return pending;
-	}
-	const module = await loadModule(new URL("./index.ts", import.meta.url));
-	await module.link(async (specifier, parent) => {
-		if (specifier.startsWith(".")) return loadModule(new URL(specifier, parent.identifier));
-		const values = imports[specifier as keyof typeof imports];
-		assert.ok(values, `Unexpected import: ${specifier}`);
-		return new SyntheticModule(Object.keys(values), function () {
-			for (const [name, value] of Object.entries(values)) this.setExport(name, value);
-		}, { context });
-	});
-	await module.evaluate();
-	const api = {
-		...(await loadModule(new URL("./emotions.ts", import.meta.url))).namespace,
-		...(await loadModule(new URL("./sprites.ts", import.meta.url))).namespace,
-		...(await loadModule(new URL("./settings.ts", import.meta.url))).namespace,
-	} as typeof import("./emotions.ts") & typeof import("./sprites.ts") & typeof import("./settings.ts");
-	(module.namespace as { default: (pi: unknown) => void }).default(pi);
-	await handlers.get("session_start")!({}, ctx);
-	t.after(() => handlers.get("session_shutdown")!({}, ctx));
-	return {
-		api, agentDir, model, image, io, notifications, displayed, labels, settleReply, timers, dialogs, capabilities, overlays,
-		// The mock implements only the host capabilities exercised by this extension.
-		ctx: ctx as unknown as ExtensionContext,
-		tick: () => { for (const { callback } of [...timers.values()]) callback(); },
-		catalog: path.join(agentDir, "pi-buddy", "custom-emotions.json"),
-		legacy: path.join(agentDir, "pi-buddy", "emotions.json"),
-		sprites: path.join(agentDir, "pi-buddy", "sprites"),
-		render: (): string[] => panel.render(26),
-		command: (input: string) => command.handler(input, ctx),
-		async act(input: string) {
-			const previous = updates;
-			await command.handler(input, ctx);
-			await waitFor(() => updates > previous);
-		},
-		async reply(text: string) {
-			const previous = updates;
-			settleReply(text);
-			await waitFor(() => updates > previous);
-		},
-	};
-}
+import { loadBuddy, sheet, signal, waitFor } from "./test-host.ts";
 
 test("bare /pi-buddy opens settings and cancellation does not mutate state", async (t) => {
 	const buddy = await loadBuddy(t);
@@ -258,9 +40,17 @@ test("settings use short confirmations and status messages without quota warning
 	]);
 });
 
-test("settings default old files to bottom-right and reject invalid positions", async (t) => {
+test("settings preserve corners, migrate dock preferences, and reject invalid positions", async (t) => {
 	const buddy = await loadBuddy(t);
 	assert.equal((await buddy.api.readSettings()).position, "bottom-right");
+	for (const corner of ["top-left", "bottom-left", "top-right", "bottom-right"]) {
+		const parsed = buddy.api.parseSettings({ description: "a robot", enabled: true, position: corner });
+		assert.equal(parsed.position, corner);
+	}
+	for (const alignment of ["left", "right"]) {
+		const parsed = buddy.api.parseSettings({ description: "a robot", enabled: true, position: alignment });
+		assert.equal(parsed.position, `bottom-${alignment}`);
+	}
 	for (const position of ["center", "", null, 3]) {
 		assert.throws(() => buddy.api.parseSettings({ description: "a robot", enabled: true, position }), /position/);
 	}
@@ -278,7 +68,7 @@ test("the settings toggle and existing shortcuts share enable/disable behavior",
 	buddy.dialogs.choices.push(0);
 	await buddy.command("");
 	assert.equal((await buddy.api.readSettings()).enabled, false);
-	assert.ok(buddy.overlays.every((overlay) => overlay.hidden));
+	assert.equal(buddy.render().length, 0);
 	buddy.settleReply("We did it!");
 	assert.equal(buddy.model.calls.length, 0);
 	await buddy.command("on");
@@ -291,28 +81,26 @@ test("the settings toggle and existing shortcuts share enable/disable behavior",
 	assert.equal(buddy.image.calls.length, 1);
 });
 
-test("all four corners persist without replacing sprites or animation timers", async (t) => {
+test("all four corners persist without replacing PNGs or animation timers", async (t) => {
 	const buddy = await loadBuddy(t);
-	buddy.capabilities.images = true;
 	await buddy.act("happy");
 	const timers = [...buddy.timers.keys()];
 	const files = await fs.readdir(buddy.sprites);
-	for (const [index, corner] of ["top-left", "top-right", "bottom-left", "bottom-right"].entries()) {
+	for (const [index, position] of ["top-left", "top-right", "bottom-left", "bottom-right"].entries()) {
 		buddy.dialogs.choices.push(2, index);
 		await buddy.command("");
-		assert.equal((await buddy.api.readSettings()).position, corner);
-		assert.equal(buddy.overlays.at(-1)?.anchor, corner);
+		assert.equal((await buddy.api.readSettings()).position, position);
+		assert.equal(buddy.overlays.at(-1)?.anchor, position);
 		assert.equal(buddy.overlays.filter((overlay) => !overlay.hidden).length, 1);
 		assert.deepEqual([...buddy.timers.keys()], timers);
-		assert.equal(buddy.displayed.length, 6);
+		assert.equal(buddy.pngs.length, 6);
+		assert.equal(buddy.displayed.length, 1);
 	}
 	assert.deepEqual(await fs.readdir(buddy.sprites), files);
 	assert.equal(buddy.image.calls.length, 1);
-	buddy.dialogs.choices.push(2, 1);
-	await buddy.command("");
 	const reloaded = await loadBuddy(t, buddy.agentDir);
 	await reloaded.act("happy");
-	assert.equal(reloaded.overlays.at(-1)?.anchor, "top-right");
+	assert.equal(reloaded.overlays.at(-1)?.anchor, "bottom-right");
 	assert.equal(reloaded.image.calls.length, 0);
 });
 
@@ -332,11 +120,11 @@ test("repositioning during generation preserves the current sprite and pending u
 		await buddy.command("");
 		assert.equal(buddy.overlays.at(-1)?.anchor, "top-left");
 		assert.deepEqual([...buddy.timers.keys()], timers);
-		assert.equal(buddy.displayed.length, 6);
+		assert.equal(buddy.displayed.length, 1);
 	} finally {
 		writing.resolve();
 	}
-	await waitFor(() => buddy.displayed.length === 12);
+	await waitFor(() => buddy.displayed.length === 2);
 	assert.equal(buddy.labels.at(-1), "angry");
 	assert.equal(buddy.image.calls.length, 2);
 });
@@ -461,19 +249,29 @@ test("failed menu changes preserve stored values and release the reaction pause"
 	assert.equal(buddy.image.calls.length, 1);
 });
 
-test("shows only the emotion at the bottom left, whether generated or cached", async (t) => {
+test("renders PNGs in a non-capturing corner overlay with only an emotion label", async (t) => {
 	const buddy = await loadBuddy(t);
 	for (let update = 0; update < 2; update++) {
 		await buddy.act("happy");
 		const lines = buddy.render();
+		assert.equal(buddy.layout().length, 0, "no dock should reserve editor space");
 		assert.equal(lines.at(-2), `│ happy${" ".repeat(18)}│`);
 		assert.ok(lines.at(-1)!.startsWith("╰"));
-		assert.ok(lines.every((line) => line.length === 26));
+		assert.ok(lines.every((line) => stripVTControlCharacters(line).length === 26));
 		assert.ok(!lines.join("\n").includes("/pi-buddy stop"));
 		assert.ok(!lines.join("\n").includes("(cached)"));
 	}
+	const overlay = buddy.overlays.at(-1)!;
+	assert.equal(overlay.nonCapturing, true);
+	assert.equal(overlay.visible(80, 40), true);
+	assert.equal(overlay.visible(20, 40), false);
+	assert.equal(overlay.visible(80, 10), false);
 	assert.equal(buddy.image.calls.length, 1);
+	assert.ok(!buddy.notifications.some((notice) => notice.level === "warning"));
 	await buddy.command("stop");
+	assert.equal(buddy.timers.size, 0);
+	assert.equal(buddy.render().length, 0);
+	assert.ok(buddy.overlays.every((overlay) => overlay.hidden));
 	assert.ok(buddy.notifications.some((notice) => notice.text === "Automatic reactions off."));
 });
 
@@ -499,8 +297,9 @@ test("leaves the image area blank while the first sprite loads", async (t) => {
 	} finally {
 		selection.resolve();
 	}
-	await waitFor(() => buddy.displayed.length === 6);
-	assert.equal(buddy.timers.size, 0);
+	await waitFor(() => buddy.displayed.length === 1);
+	assert.equal(buddy.timers.size, 1);
+	assert.equal([...buddy.timers.values()][0].interval, 125);
 });
 
 test("keeps the existing sprite and shows loading dots throughout an update", async (t) => {
@@ -514,7 +313,7 @@ test("keeps the existing sprite and shows loading dots throughout an update", as
 	buddy.io.beforeWrite = (file) => {
 		if (file.endsWith(".png")) {
 			assert.equal(buddy.render().at(-2), `│ ·●·${" ".repeat(20)}│`);
-			assert.equal(buddy.displayed.length, 6);
+			assert.equal(buddy.displayed.length, 1);
 		}
 	};
 	await buddy.command("get mad");
@@ -524,16 +323,53 @@ test("keeps the existing sprite and shows loading dots throughout an update", as
 		buddy.tick();
 		assert.equal(buddy.render().at(-2), `│ ·●·${" ".repeat(20)}│`);
 		assert.deepEqual(buddy.render().slice(0, -2), previous.slice(0, -2));
-		assert.equal(buddy.displayed.length, 6);
+		assert.equal(buddy.displayed.length, 1);
 	} finally {
 		selection.resolve();
 	}
-	await waitFor(() => buddy.displayed.length === 12);
+	await waitFor(() => buddy.displayed.length === 2);
 	assert.deepEqual(buddy.labels, ["●··", "happy", "●··", "·●·", "angry"]);
-	assert.equal(buddy.timers.size, 0);
+	assert.equal(buddy.timers.size, 1);
 	await buddy.act("angry");
 	assert.deepEqual(buddy.labels.slice(-2), ["●··", "angry"]);
 	assert.equal(buddy.image.calls.length, 2, "the repeated emotion still uses its cache");
+});
+
+test("loops original PNG bytes and invalidates each frame for retransmission", async (t) => {
+	const buddy = await loadBuddy(t);
+	const frames = await Promise.all(["#f00", "#00f"].map(async (background) => {
+		const png = await sharp({ create: { width: 336, height: 336, channels: 3, background } }).png().toBuffer();
+		return png.toString("base64");
+	}));
+	const view = buddy.api.showBuddy(buddy.ctx, "bottom-right");
+	t.after(() => view.hide());
+	view.update({ status: "ready", emotion: "happy", frames });
+	assert.deepEqual(buddy.pngs.map((png) => png.data), frames);
+	assert.ok(buddy.pngs.every((png) => png.mimeType === "image/png" && png.imageId === 1));
+	const first = buddy.render();
+	buddy.tick();
+	assert.notDeepEqual(buddy.render(), first);
+	assert.equal(buddy.pngs[1].invalidations, 1);
+	buddy.tick();
+	assert.deepEqual(buddy.render(), first);
+	assert.equal(buddy.pngs[0].invalidations, 1);
+	view.update({ status: "loading" });
+	assert.equal(buddy.timers.size, 2);
+	view.update({ status: "failed" });
+	assert.equal(buddy.timers.size, 1);
+	assert.deepEqual(buddy.render().slice(0, -2), first.slice(0, -2));
+	view.hide();
+	assert.equal(buddy.timers.size, 0);
+	assert.equal(buddy.render().length, 0);
+});
+
+test("unsupported terminals retain PNGs on disk without an animation timer", async (t) => {
+	const buddy = await loadBuddy(t);
+	buddy.capabilities.images = null;
+	await buddy.act("happy");
+	assert.equal(buddy.timers.size, 0);
+	assert.ok(buddy.notifications.some((notice) => notice.text.includes("cannot display images")));
+	await fs.access(buddy.sprites);
 });
 
 test("stopping the buddy clears the loading timer", async (t) => {
@@ -744,7 +580,7 @@ test("different replies reuse one sprite; exact IDs bypass Luna across sessions 
 	await reloaded.act("happy");
 	assert.equal(reloaded.model.calls.length, 0);
 	assert.equal(reloaded.image.calls.length, 0);
-	assert.deepEqual(reloaded.displayed, buddy.displayed.slice(0, 6));
+	assert.deepEqual(reloaded.displayed, buddy.displayed.slice(0, 1));
 	assert.ok(reloaded.notifications.some((notice) => notice.text.includes("Pi Buddy happy:")));
 });
 
@@ -868,7 +704,7 @@ test("avatar changes await cancelled writes and cleanup, dropping queued and pau
 		await changing;
 	}
 	await assert.rejects(fs.access(buddy.sprites), { code: "ENOENT" });
-	assert.equal(buddy.displayed.length, 6, "the cancelled sprite must never be displayed");
+	assert.equal(buddy.displayed.length, 1, "the cancelled sprite must never be displayed");
 	assert.equal(buddy.image.calls.length, 2, "no queued or paused reaction should restart after cleanup");
 	buddy.io.beforeWrite = undefined;
 	buddy.io.beforeRemove = undefined;
