@@ -9,6 +9,10 @@ const ENDPOINT = "https://chatgpt.com/backend-api/codex/images/generations";
 const PREFERENCES = join(getAgentDir(), "pi-buddy.json");
 const COLUMNS = 3;
 const ROWS = 2;
+// Smallest 16px-aligned square cells that keep the sheet above GPT Image 2's 655,360px minimum.
+const CELL_SIZE = 336;
+const SHEET_WIDTH = COLUMNS * CELL_SIZE;
+const SHEET_HEIGHT = ROWS * CELL_SIZE;
 const FPS = 8;
 const MAX_RESPONSE_BYTES = 48 * 1024 * 1024;
 const WIDGET = "pi-buddy";
@@ -104,7 +108,7 @@ AVATAR IDENTITY (always preserve): ${description}
 ANIMATION ACTION (do not change the avatar's identity): ${action}
 
 The sheet must contain exactly six successive frames of ONE seamless looping animation, in a strict 3-column by 2-row grid. Frame order is left-to-right across the top row, then left-to-right across the bottom row.
-Use a 1536 by 1024 canvas with six equal 512 by 512 cells. Each cell contains exactly one complete sprite, with room around it so no part crosses the cell boundary. No outer margins, gutters, grid lines, borders, labels, numbers, or text.
+Use a ${SHEET_WIDTH} by ${SHEET_HEIGHT} canvas with six equal ${CELL_SIZE} by ${CELL_SIZE} cells. Each cell contains exactly one complete sprite, with room around it so no part crosses the cell boundary. No outer margins, gutters, grid lines, borders, labels, numbers, or text.
 Keep the same character design, palette, scale, camera angle, ground baseline, and registration point in every frame. Animate in place: no camera movement or character drifting across the cells. Each frame must show a distinct successive pose, and the last must transition naturally back to the first.
 Use a retro low-resolution pixel-art aesthetic: visible square pixels, hard edges, a limited palette, no antialiasing, no gradients, and no smoothing. Use the exact same solid light-gray background in every cell. No scenery or decorative elements.`;
 }
@@ -138,7 +142,7 @@ async function generateSheet(prompt: string, ctx: ExtensionContext, signal: Abor
 			originator: "pi",
 			"x-codex-image-turn-id": randomUUID(),
 		},
-		body: JSON.stringify({ model: "gpt-image-2", prompt, background: "auto", quality: "auto", size: "1536x1024" }),
+		body: JSON.stringify({ model: "gpt-image-2", prompt, background: "auto", quality: "low", size: `${SHEET_WIDTH}x${SHEET_HEIGHT}` }),
 		signal,
 		redirect: "error",
 	});
