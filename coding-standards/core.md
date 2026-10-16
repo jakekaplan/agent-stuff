@@ -131,13 +131,14 @@ Separate **expected failures** from **bugs**.
 
 ## Names
 
-Follow the Naming rules in the global `AGENTS.md`. In code, also:
-
+- Name exported symbols for the domain action or role they perform. Meaning at call sites matters more than grep uniqueness or word count.
+- Names must stay true. A name that claims work it does not do, or that has drifted from what the code now does, is a bug, not a style issue.
+- Use the product's own vocabulary, one noun per concept across code, tests, logs, and events. If the product says "workspace," the code doesn't also say "project" and "space." If you had to invent a term, you do not have the concept yet.
+- No structural suffixes that don't distinguish two real concepts: `Manager`, `Helper`, `Processor`, `Handler`, `Service`, `Data`, `Info`, `Record`, `Result`, `Config`, `Dto`, `Shape`. Reaching for one means you do not have the concept yet.
+- Build the name from the context the module already supplies: `Version`, not `ProjectVersion`; `users.create`, not `users.create_user`; a file in `billing/` is `invoice.py`, not `billing_invoice.py`. No entity piles like `VersionDeploymentTargets`. Keep a qualifier only where it marks a real variant, call sites mix domains such as legacy beside native, or the symbol crosses a package boundary. Otherwise keep the value local or pass the values directly.
 - Name files and modules for the concept they own. No `utils`, `helpers`, `common`, `misc`, or `types` grab-bags.
-- No structural suffixes that don't distinguish two real concepts: `Manager`, `Helper`, `Processor`, `Handler`, `Service`, `Data`, `Info`, `Record`, `Result`, `Config`, `Dto`, `Shape`.
-- Do not repeat the context the module supplies: `users.create`, not `users.create_user`; a file in `billing/` is `invoice.py`, not `billing_invoice.py`.
 - Predicates read as questions: `is_expired`, `has_permission`, `can_retry`.
-- One term per concept across code, tests, logs, and events. If the product says "workspace," the code doesn't also say "project" and "space."
+- If no name fits, the thing does more than one job. Split it before naming it. A long name is a prompt to inspect the design, not a reason by itself to add another module or abstraction.
 
 ## Comments
 
