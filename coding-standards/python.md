@@ -161,7 +161,8 @@ async def get_invoice(invoice_id: InvoiceId, invoices: InvoiceStore = Depends(in
 
 ## Async
 
-- Don't call blocking I/O from async code. Use the async client (httpx `AsyncClient`, aioboto3) or `asyncio.to_thread` for unavoidable blocking calls.
+- Don't block the event loop while other work is running on it. Use the async client (httpx `AsyncClient`, aioboto3), or `asyncio.to_thread` for unavoidable blocking calls. A quick read at startup, before anything runs concurrently, needs neither.
+- Annotate an `@asynccontextmanager` function as returning `AsyncGenerator[T]`, not `AsyncIterator[T]`.
 - Run independent awaits concurrently with `asyncio.TaskGroup`. Don't create a task you don't own and await.
 - Create long-lived clients once and close them with `async with` at the entrypoint or the framework's lifespan hook, not per call.
 

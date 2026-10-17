@@ -67,6 +67,7 @@ server.start()
 - Do not add options, parameters, config, modes, or extension points that no current caller needs.
 - Add a helper only when a second real caller exists or the helper owns an invariant of its own. Apply the deletion test: if inlining it makes complexity disappear, it was waste; if inlining it spreads complexity across callers, it earns its keep.
 - Do not write wrappers that forward to another function with the same arguments.
+- Keep private helpers rare. A private function with one caller gets inlined unless it names a real concept or hides real complexity. Following one operation should not mean jumping between a trail of `_helpers`. When behavior belongs to a type, put it on the type.
 - A zero-argument function that returns a literal, a template string, or a settings lookup is a constant or a default. Make it one.
 - When you replace an internal API, migrate every caller and delete the old one in the same change. No compatibility shims, aliases, or deprecated paths for internal code.
 - Prefer the standard library and the repository's existing utilities over new helpers or new dependencies.
@@ -82,7 +83,7 @@ server.start()
 
 - Handle edge cases with early returns at the top. Keep the main path unindented.
 - More than two levels of nesting means something wants to be extracted, inverted, or modeled.
-- When a block needs a comment to explain what it does, extract it into a function whose name says that.
+- When a block needs a comment to explain what it does, first try a clearer variable name or a simpler structure. Extract a function only when it names a concept a reader would look for.
 - No boolean or mode parameters that switch a function's behavior. Write two functions, or take a literal or enum the caller has to name.
 - When a new case grows an `if`/`elif` chain by another branch, or adds a second flag that must stay in sync with the first, stop and model it: a lookup table, a tagged union or enum with an exhaustive `match`/`switch`, or a state machine.
 - A function does one thing at one level of abstraction. If it doesn't fit on a screen, look again.
@@ -225,6 +226,7 @@ If any of these show up in a diff, fix them before calling it done:
 - a boolean parameter that changes what a function does
 - an `if` chain that grew by one more branch for the new case
 - a wrapper or helper with one caller that adds no meaning
+- a file where private helpers outnumber the functions that use them
 - a class that is a function in disguise (only `__init__` and one method, or only static methods)
 - comments that narrate code, and docstrings that repeat the signature
 - a new `utils`/`helpers` file, or a name ending in `Manager`/`Helper`/`Data`/`Info`
