@@ -88,15 +88,37 @@ server.start()
 - A function does one thing at one level of abstraction. If it doesn't fit on a screen, look again.
 - Run independent work concurrently. Do not serialize it for no reason.
 
-## Boundaries: parse once, then trust the types
+## Boundaries and interfaces
 
-Boundaries are where data enters from outside the code you control: HTTP requests and responses, CLI args, environment and config files, database rows, queue messages, files, and third-party SDK return values.
+A boundary is where code you control meets something you don't: the network, storage, third-party code, the framework, the operating system, user input. Boundaries are real. Layers are optional. Put care into the first and make the second pay rent.
+
+### Inbound: parse once, then trust the types
 
 - At a boundary, parse untrusted data into a typed domain value. Parsing means you get back a value whose type proves the check passed; validating and then throwing the information away is not parsing.
 - Inside the system, trust the types. No re-validation, no defensive `None`/`null` checks on values the type says are present, no runtime type checks (`isinstance`, `typeof`, `hasattr`) on parameters that already have a type, and no `try` blocks "just in case."
-- Do not pass raw dicts, JSON blobs, ORM rows, or SDK objects inward. Translate them at the edge.
-- Parse configuration and environment once at startup into a typed settings object and pass it in. Do not read the environment in the middle of the code.
+- Parse configuration and environment once at startup into a typed settings object. Do not read the environment in the middle of the code.
 - Name functions for what they return: `parse_x` turns untrusted input into an `X` or fails; `is_x` is a true predicate; avoid `validate_x` for something that returns a refined value.
+
+### Outbound: concentrate each dependency at one seam
+
+- Give each external dependency one owner. Everything about it lives there: how to call it, how its failures map to yours, how it is configured, observed, and retried. Nothing else imports it.
+- Callers ask the owner for what they need in domain terms. The dependency's own types and objects never leak past the owner.
+
+### What crosses a boundary
+
+- A module's interface speaks the domain, not its implementation. Its signatures carry no framework types, wire formats, or storage representations.
+- Each type has one source of truth. Derive from it everywhere instead of restating it at each layer, and translate only where the meaning changes.
+
+### Design interfaces deliberately
+
+- Narrow and in the caller's language: expose what callers need to do, not the steps you happen to take. Return what answers the caller's question.
+- An interface earns its place by hiding a decision. If callers must know how it works to use it, it hides nothing. If it is as big as the implementation, it isn't earning its keep.
+- Required dependencies (clients, stores, clocks, settings) are required parameters. Never optional, never reached for through globals or import-time singletons.
+- Small and cohesive beats a bag of callbacks, booleans, and optional behavior switches.
+
+### Wire concrete things at the entrypoint
+
+- The entrypoint builds clients, stores, and settings and passes them down. Everything below receives what it needs.
 
 ## Model the domain in types
 
@@ -106,7 +128,6 @@ Boundaries are where data enters from outside the code you control: HTTP request
 - Push optionality outward. A function that needs a value takes the value, not an optional it then checks. Branch or parse before calling.
 - Represent absence with `None`/`null`/`Option`, never with a sentinel string, `-1`, or an empty object.
 - Represent modes with literal unions or enums, not free strings.
-- When a schema, migration, OpenAPI spec, or protobuf owns a type, derive from it instead of hand-writing a parallel one.
 - Do not force an abstraction. If the current shape is clear, local, and unlikely to grow, plain code is the right answer.
 
 ## Fix the cause
@@ -124,6 +145,7 @@ Separate **expected failures** from **bugs**.
 - Catch narrowly, as close as possible to the call that can fail in a known way, and translate the failure into your own error type with the original as its cause.
 - Never swallow an error: no catch-and-continue, no catch-log-and-return-default, no catch-all that returns `None`/`null`. If you can't name what you're catching and why recovery is correct, don't catch it.
 - Error messages say what operation failed and with which identifiers. Never put secrets or tokens in errors or logs.
+- A message a person sees says what happened, what wasn't affected, and what to do next. Never "Something went wrong" when the code knows more.
 
 ## Escape hatches need a written reason
 
@@ -159,7 +181,6 @@ Docstrings belong on the public interface of a package or library, and only when
 ## State and side effects
 
 - Keep decisions and calculations in pure functions. Keep I/O at the edges, in the code that calls them.
-- Pass dependencies in (clients, stores, clocks, settings). Do not reach for globals or import-time singletons.
 - Importing a module must not do work: no connections, no network calls, no env reads, no registration with side effects.
 - Prefer returning new values to mutating arguments. Keep mutable state as local as possible: locals over fields, fields over module state, never mutable globals.
 - Tell, don't ask. Put state and its invariants behind one owner and call its domain operation (`session.promote(message)`) instead of reading its state and changing it from outside.
@@ -168,7 +189,6 @@ Docstrings belong on the public interface of a package or library, and only when
 
 ## Modules and files
 
-- A module hides real complexity behind a small interface. If the interface is as big as the implementation, the module isn't earning its keep.
 - Every layer, interface, and file must pay for itself: it owns an invariant, hides real complexity, has more than one real implementation, or removes stable duplication. No `controller -> service -> repository` chains that pass the same call through. Start with the direct implementation and extract when the code shows a natural cut point.
 - Duplication is cheaper than the wrong abstraction. Extract shared code when the callers share meaning, not when the lines merely look alike.
 - Organize by feature or use case (`invoices/pay.py`), not by layer (`controllers/`, `services/`, `repositories/`).
@@ -181,7 +201,8 @@ Docstrings belong on the public interface of a package or library, and only when
 
 - Test behavior through the public interface: inputs in, observable outcomes out (return values, raised errors, persisted state, responses, emitted events).
 - Never patch modules (`mock.patch("pkg.mod.thing")`, `vi.mock`). Make the dependency a parameter and pass a test double in.
-- For a test double, use the test library's mock with the real interface's spec. Write a fake by hand only when it needs real behavior, such as an in-memory store. Use a real local database when SQL, constraints, or transactions matter.
+- For a test double, use the test library's mock with the real interface's spec. Write a fake by hand only when it needs real behavior, such as an in-memory store.
+- Test a boundary against the real thing running locally, not a simulation of it. Substitute only what cannot run locally.
 - Assert outcomes, not calls. `assert_called_with` is the main assertion only when the call itself is the only observable behavior.
 - One behavior per test, and the test name states it. A failing test name should tell you what broke.
 - Use property tests for parsers, round-trips, and normalization (Hypothesis, fast-check, proptest).
@@ -199,6 +220,7 @@ If any of these show up in a diff, fix them before calling it done:
 - a `None`/`null` check on a value whose type says it's present
 - runtime type checks or `hasattr`/`getattr`/`in` probing on already-typed values
 - `Any`, `any`, `dict[str, Any]`, `Record<string, unknown>` past the boundary
+- a dependency's own types or objects used outside the module that owns it
 - casts and non-null assertions without a `SAFETY:` comment
 - a boolean parameter that changes what a function does
 - an `if` chain that grew by one more branch for the new case
@@ -218,4 +240,4 @@ If any of these show up in a diff, fix them before calling it done:
 
 ## Sources
 
-Adapted from Dillon Mulroy's `coding-standards` skill (github.com/dmmulroy/skills), Lauren Tan's pstack principles (github.com/cursor/plugins/tree/main/pstack), and Hona's "Code like Luke" (gist.github.com/Hona/53142c07c9decb735392f132ace34003).
+Adapted from Dillon Mulroy's `coding-standards` skill (github.com/dmmulroy/skills), Lauren Tan's pstack principles (github.com/cursor/plugins/tree/main/pstack), Rhys Sullivan's skills (github.com/RhysSullivan/skills), and Hona's "Code like Luke" (gist.github.com/Hona/53142c07c9decb735392f132ace34003).
